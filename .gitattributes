@@ -1,0 +1,7 @@
+# Всё текстовое — с LF: проект работает в Linux-контейнерах, а git на Windows по
+# умолчанию выписывает CRLF ("#!/bin/sh\r" не запустится).
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.pdf binary

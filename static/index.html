@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ticket-rush</title>
+</head>
+<body>
+  <!-- Каркас (этап 1). Каталог и схема зала появятся на этапе 2. -->
+  <h1>ticket-rush</h1>
+  <p>Статус API: <code id="health">…</code></p>
+  <script>
+    fetch("/api/health")
+      .then((r) => r.json())
+      .then((h) => { document.getElementById("health").textContent = JSON.stringify(h); })
+      .catch(() => { document.getElementById("health").textContent = "недоступен"; });
+  </script>
+</body>
+</html>

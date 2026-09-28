@@ -1,0 +1,117 @@
+# Локальный стек:
+#   docker compose up --build --scale api=2
+# Секреты и параметры — в .env рядом (см. .env.example); compose читает его сам.
+#
+# Ёмкость соединений PostgreSQL — считается по всей системе, не по одному воркеру:
+#   реплики API × WEB_CONCURRENCY × DB_POOL_MAX  (+ init, + worker на этапе 6)
+#   2 × 2 × 10 = 40  <  max_connections = 100
+# Каждое соединение Postgres — отдельный серверный процесс (~10 МБ). Превысить
+# max_connections — получить отказы в подключении под нагрузкой, как раз когда
+# они нужнее всего.
+
+x-logging: &default-logging
+  # Без лимита json-file растёт бесконечно и однажды забивает диск.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-database-url: &database-url postgresql://ticket:${POSTGRES_PASSWORD:?задай POSTGRES_PASSWORD в .env}@postgres:5432/ticket
+
+services:
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/nginx-health || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+
+  api:
+    build: ./api
+    # Тот же образ использует init — задаём ему явное имя.
+    image: ticket-rush-api:local
+    # Нет container_name (ломает --scale) и нет ports: API доступен только из
+    # Docker-сети, единственный вход снаружи — nginx.
+    expose:
+      - "8000"
+    environment:
+      DATABASE_URL: *database-url
+      REDIS_URL: redis://redis:6379/0
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+      DB_POOL_MAX: ${DB_POOL_MAX:-10}
+    depends_on:
+      # Миграции и наполнение должны закончиться ДО старта API: иначе первые
+      # запросы пришли бы в базу без таблиц.
+      init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    # Docker ждёт stop_grace_period после SIGTERM, потом SIGKILL. Должно быть
+    # больше gunicorn --graceful-timeout (30 с).
+    stop_grace_period: 40s
+    logging: *default-logging
+
+  # Одноразовый контейнер: миграции + наполнение зала, затем выход с кодом 0.
+  # Отдельно от API, потому что миграция должна выполниться ОДИН раз, а не в
+  # каждой из N реплик наперегонки.
+  init:
+    image: ticket-rush-api:local
+    # Образ собирает сервис api; искать его в Docker Hub незачем.
+    pull_policy: never
+    command: ["sh", "-c", "alembic upgrade head && python -m app.seed"]
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    logging: *default-logging
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ticket
+      POSTGRES_DB: ticket
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задай POSTGRES_PASSWORD в .env}
+    # max_connections задан явно, чтобы бюджет соединений (см. шапку) был виден.
+    command: ["postgres", "-c", "max_connections=100"]
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    # Порт наружу не пробрасывается: база доступна только сервисам.
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticket -d ticket"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *default-logging
+
+volumes:
+  pg_data:
+  redis_data:

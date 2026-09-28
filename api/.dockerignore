@@ -1,0 +1,14 @@
+# В образ — только код, миграции и замок зависимостей. .env не должен попасть в
+# слой образа: оттуда его не удалить, он виден в истории слоёв.
+.env
+.env.*
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+tests/
+Dockerfile
+.dockerignore
+requirements.in
