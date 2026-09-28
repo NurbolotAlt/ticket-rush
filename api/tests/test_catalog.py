@@ -3,11 +3,12 @@
 from conftest import running_app
 
 from app.catalog import seatmap_version_key
+from app.config import SeedSettings
 from app.seed import seed
 
 
 async def test_list_events(settings, db, redis):
-    event_id, _ = await seed(db, settings)
+    event_id, _ = await seed(db, SeedSettings())
     async with running_app(settings) as client:
         response = await client.get("/api/events")
         assert response.status_code == 200
@@ -16,7 +17,7 @@ async def test_list_events(settings, db, redis):
 
 
 async def test_event_details_with_sections(settings, db, redis):
-    event_id, _ = await seed(db, settings)
+    event_id, _ = await seed(db, SeedSettings())
     async with running_app(settings) as client:
         body = (await client.get(f"/api/events/{event_id}")).json()
         assert body["total_seats"] == 2000
@@ -25,7 +26,7 @@ async def test_event_details_with_sections(settings, db, redis):
 
 
 async def test_seatmap_has_every_seat_once(settings, db, redis):
-    event_id, _ = await seed(db, settings)
+    event_id, _ = await seed(db, SeedSettings())
     async with running_app(settings) as client:
         response = await client.get(f"/api/events/{event_id}/seats")
         body = response.json()
@@ -46,7 +47,7 @@ async def test_seatmap_has_every_seat_once(settings, db, redis):
 async def test_seatmap_carries_version_from_redis(settings, db, redis):
     # Версия схемы — задел для этапа 4: клиент сверяет её с версиями изменений,
     # пришедших по WebSocket.
-    event_id, _ = await seed(db, settings)
+    event_id, _ = await seed(db, SeedSettings())
     await redis.set(seatmap_version_key(event_id), 42)
     async with running_app(settings) as client:
         assert (await client.get(f"/api/events/{event_id}/seats")).json()["version"] == 42

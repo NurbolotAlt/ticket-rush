@@ -79,6 +79,12 @@ def settings(migrated, redis_url) -> Settings:
         db_pool_min=1,
         db_pool_max=5,
         db_acquire_timeout_seconds=2,
+        session_secret="test-secret-" + "x" * 32,
+        # ASGI-клиент ходит по http://, а Secure-cookie браузер отправляет только
+        # по HTTPS — httpx ведёт себя так же.
+        session_cookie_secure=False,
+        # Тики впускателя тесты вызывают сами.
+        admitter_enabled=False,
     )
 
 

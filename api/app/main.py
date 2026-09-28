@@ -15,12 +15,16 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 
-from app import catalog
+from app import catalog, queue_routes
+from app.admitter import Admitter
 from app.config import Settings, get_settings
 from app.deps import DatabaseUnavailable, check_db, check_redis, ensure_db_pool, error
 from app.logging_config import setup_logging
+from app.queue_routes import EventScheduleCache
+from app.realtime import ConnectionManager, RedisSubscriber, route_by_event
 from app.redis_client import create_redis_client, create_redis_pool
 from app.request_id import RequestIdMiddleware
+from app.waiting_room import STATE_CHANNEL, WaitingRoom
 
 log = logging.getLogger(__name__)
 
@@ -45,10 +49,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await ensure_db_pool(app)
         except DatabaseUnavailable:
             pass  # уже залогировано; повторим при первом запросе к БД
+
+        app.state.room = WaitingRoom(app.state.redis)
+        app.state.schedule = EventScheduleCache()
+        app.state.manager = ConnectionManager()
+        # Одна подписка воркера: состояние очередей -> WebSocket-клиентам концерта.
+        subscriber = RedisSubscriber(
+            app.state.redis, {STATE_CHANNEL: route_by_event(app.state.manager)}
+        )
+        await subscriber.start()
+        app.state.admitter = Admitter(app, app.state.room, settings)
+        if settings.admitter_enabled:
+            app.state.admitter.start()
+
         log.info("worker_started", extra={"pid": os.getpid()})
         try:
             yield
         finally:
+            await app.state.admitter.stop()
+            await subscriber.stop()
             if app.state.db is not None:
                 await app.state.db.close()
             await redis_pool.disconnect()
@@ -57,6 +76,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="ticket-rush", lifespan=lifespan)
     app.add_middleware(RequestIdMiddleware)
     app.include_router(catalog.router)
+    app.include_router(queue_routes.router)
 
     # --- Сбои зависимостей -> 503, а не 500 ---------------------------------
     # Недоступный Redis/Postgres или исчерпанный пул — временная недоступность,
@@ -89,12 +109,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse(status_code=200 if redis_ok and db_ok else 503, content=body)
 
     @app.get("/api/debug/instance-info")
-    async def instance_info() -> dict:
-        return {"hostname": HOSTNAME, "pid": os.getpid()}
+    async def instance_info(request: Request) -> dict:
+        return {
+            "hostname": HOSTNAME,
+            "pid": os.getpid(),
+            "admitter_leader": request.app.state.admitter.is_leader,
+            "ws_clients": request.app.state.manager.count(),
+        }
 
     return app
 
 
-# Точка входа для `gunicorn app.main:app`. Соединений здесь не открывается —
-# всё тяжёлое происходит в lifespan, уже внутри каждого воркера.
-app = create_app()
+# Модульной переменной app нет намеренно: gunicorn вызывает фабрику сам
+# (`gunicorn "app.main:create_app()"`). Иначе любой import app.main читал бы
+# настройки — и падал бы без SESSION_SECRET даже там, где он не нужен.

@@ -36,6 +36,19 @@ def error(status: int, detail: str, reason: str, retry_after: int | None = None)
     )
 
 
+def client_ip(request: Request) -> str:
+    """IP клиента из X-Real-IP.
+
+    За nginx request.client.host — адрес контейнера nginx, одинаковый для всех.
+    X-Real-IP nginx ПЕРЕЗАПИСЫВАЕТ адресом соединения, а API недоступен снаружи в
+    обход nginx — поэтому заголовку можно доверять.
+    """
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    return request.client.host if request.client else "unknown"
+
+
 def cacheable(response: Response, seconds: int) -> Response:
     """Разрешить кэширование ответа на `seconds` секунд.
 
@@ -63,16 +76,25 @@ async def ensure_db_pool(app: FastAPI) -> asyncpg.Pool:
 
 
 @asynccontextmanager
-async def db(request: Request) -> AsyncIterator[asyncpg.Connection]:
-    """Соединение с БД для обработчика; любые сбои связи -> DatabaseUnavailable."""
+async def db_for_app(app: FastAPI) -> AsyncIterator[asyncpg.Connection]:
+    """Соединение с БД; любые сбои связи -> DatabaseUnavailable.
+
+    По приложению, а не по запросу: нужно и фоновым задачам (впускатель), у
+    которых HTTP-запроса нет.
+    """
     try:
-        pool = await ensure_db_pool(request.app)
-        async with db_connection(pool, request.app.state.settings) as connection:
+        pool = await ensure_db_pool(app)
+        async with db_connection(pool, app.state.settings) as connection:
             yield connection
     except DatabaseUnavailable:
         raise
     except DB_CONNECTION_ERRORS as exc:
         raise DatabaseUnavailable from exc
+
+
+def db(request: Request):
+    """Соединение с БД для обработчика HTTP-запроса."""
+    return db_for_app(request.app)
 
 
 async def check_redis(app: FastAPI) -> bool:

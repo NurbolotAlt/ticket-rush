@@ -9,13 +9,12 @@
 """
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
-
-from app.config import get_settings
 
 config = context.config
 if config.config_file_name is not None:
@@ -23,8 +22,9 @@ if config.config_file_name is not None:
 
 
 def database_url() -> str:
-    # Тесты передают адрес контейнера явно; иначе — из DATABASE_URL.
-    url = config.get_main_option("sqlalchemy.url") or get_settings().database_url
+    # Тесты передают адрес контейнера явно; иначе — из DATABASE_URL. Только адрес,
+    # а не все настройки приложения: миграциям не нужны ни Redis, ни секрет сессий.
+    url = config.get_main_option("sqlalchemy.url") or os.environ["DATABASE_URL"]
     # SQLAlchemy нужно имя драйвера в схеме URL.
     return url.replace("postgresql://", "postgresql+asyncpg://", 1)
 

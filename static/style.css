@@ -66,6 +66,35 @@ h1 { font-size: 22px; margin: 8px 0 12px; }
 .events a:hover { border-color: var(--accent); }
 .events .title { font-weight: 600; }
 
+.small { font-size: 12px; }
+
+.queue {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin: 12px 0;
+  display: grid;
+  gap: 8px;
+}
+.queue-text { font-size: 17px; font-weight: 600; }
+.queue.admitted { border-color: var(--free); }
+.queue.admitted .queue-text { color: var(--free); }
+.progress { height: 8px; background: var(--border); border-radius: 999px; overflow: hidden; }
+.progress > div { height: 100%; width: 0; background: var(--accent); transition: width 0.5s; }
+
+button {
+  font: inherit;
+  justify-self: start;
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.6; cursor: progress; }
+
 .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0 16px; font-size: 13px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 

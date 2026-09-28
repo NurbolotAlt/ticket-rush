@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import asyncpg
 
-from app.config import Settings, get_settings
+from app.config import SeedSettings
 from app.logging_config import setup_logging
 
 log = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ SECTION_PRICES = {"A": 12_000, "B": 9_000, "C": 6_500, "D": 4_500}
 DEFAULT_PRICE = 4_000
 
 
-async def seed(connection: asyncpg.Connection, settings: Settings) -> tuple[int, int]:
+async def seed(connection: asyncpg.Connection, settings: SeedSettings) -> tuple[int, int]:
     """Возвращает (event_id, сколько мест в зале)."""
     now = datetime.now(UTC)
     # Весь seed в одной транзакции: либо концерт вместе со всеми местами, либо
@@ -65,8 +65,8 @@ async def seed(connection: asyncpg.Connection, settings: Settings) -> tuple[int,
 
 
 async def main() -> None:
-    settings = get_settings()
-    setup_logging(settings.log_level)
+    settings = SeedSettings()
+    setup_logging()
     connection = await asyncpg.connect(settings.database_url)
     try:
         event_id, total = await seed(connection, settings)

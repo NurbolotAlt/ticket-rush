@@ -51,6 +51,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
       DB_POOL_MAX: ${DB_POOL_MAX:-10}
+      # Только API получает ключ сессий; init и Postgres о нём не знают.
+      SESSION_SECRET: ${SESSION_SECRET:?задай SESSION_SECRET в .env}
+      ADMIT_RATE_PER_SECOND: ${ADMIT_RATE_PER_SECOND:-50}
+      ADMIT_CAPACITY: ${ADMIT_CAPACITY:-200}
     depends_on:
       # Миграции и наполнение должны закончиться ДО старта API: иначе первые
       # запросы пришли бы в базу без таблиц.
@@ -74,6 +78,8 @@ services:
     command: ["sh", "-c", "alembic upgrade head && python -m app.seed"]
     environment:
       DATABASE_URL: *database-url
+      # Отрицательное — продажи уже открыты (только при первом наполнении).
+      SEED_SALE_OPENS_IN_MINUTES: ${SEED_SALE_OPENS_IN_MINUTES:-10}
     depends_on:
       postgres:
         condition: service_healthy

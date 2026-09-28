@@ -48,6 +48,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
     CMD curl -fsS http://localhost:8000/api/health || exit 1
 
+# "app.main:create_app()" — gunicorn сам вызывает фабрику приложения.
 # Gunicorn — мастер-процесс (порт, перезапуск упавших воркеров, graceful
 # shutdown), UvicornWorker — asyncio event loop в каждом воркере.
 # Число воркеров — из WEB_CONCURRENCY (gunicorn читает его сам).
@@ -56,7 +57,7 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
 #   простаивающее соединение закрывал nginx, а не backend (иначе редкие 502).
 # --worker-tmp-dir /dev/shm: heartbeat воркера в RAM, а не на overlay-диске.
 # --no-control-socket: управляющий сокет gunicorn (с 25.1) нам не нужен.
-CMD ["gunicorn", "app.main:app", \
+CMD ["gunicorn", "app.main:create_app()", \
      "--worker-class", "uvicorn_worker.UvicornWorker", \
      "--bind", "0.0.0.0:8000", \
      "--timeout", "90", \
