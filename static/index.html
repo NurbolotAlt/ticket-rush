@@ -4,16 +4,33 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ticket-rush</title>
+  <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <!-- Каркас (этап 1). Каталог и схема зала появятся на этапе 2. -->
-  <h1>ticket-rush</h1>
-  <p>Статус API: <code id="health">…</code></p>
-  <script>
-    fetch("/api/health")
-      .then((r) => r.json())
-      .then((h) => { document.getElementById("health").textContent = JSON.stringify(h); })
-      .catch(() => { document.getElementById("health").textContent = "недоступен"; });
-  </script>
+  <header class="top">
+    <a href="/" class="brand">ticket-rush</a>
+    <span id="source" class="source" title="Откуда пришли данные схемы зала"></span>
+  </header>
+
+  <main class="page">
+    <section id="events-view">
+      <h1>Концерты</h1>
+      <ul id="events" class="events"></ul>
+    </section>
+
+    <section id="event-view" hidden>
+      <a href="#" id="back" class="back">← все концерты</a>
+      <h1 id="event-title"></h1>
+      <p id="event-meta" class="muted"></p>
+      <div id="legend" class="legend"></div>
+      <div id="hall" class="hall">
+        <div class="stage">СЦЕНА</div>
+      </div>
+    </section>
+
+    <p id="error" class="error" hidden></p>
+  </main>
+
+  <script src="/app.js"></script>
 </body>
 </html>

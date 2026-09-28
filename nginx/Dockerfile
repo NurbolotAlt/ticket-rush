@@ -11,6 +11,7 @@ RUN sed -i 's/\r$//' /docker-entrypoint.d/05-generate-cert.sh \
     && chmod +x /docker-entrypoint.d/05-generate-cert.sh
 
 COPY nginx/nginx.conf /etc/nginx/conf.d/default.conf
+COPY nginx/security-headers.conf /etc/nginx/snippets/security-headers.conf
 
 # Пути — от КОРНЯ проекта (build context = корень): Dockerfile копирует и nginx/,
 # и static/, а COPY не видит файлов за пределами контекста.

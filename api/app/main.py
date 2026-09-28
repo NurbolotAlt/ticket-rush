@@ -1,4 +1,4 @@
-"""HTTP-слой API: lifespan с пулами, health, превращение сбоев зависимостей в 503.
+"""Сборка приложения: lifespan с пулами, маршруты, превращение сбоев в 503.
 
 Запуск — gunicorn + UvicornWorker (см. api/Dockerfile). Всё из lifespan создаётся
 в КАЖДОМ воркере отдельно, уже после fork'а.
@@ -11,13 +11,13 @@ import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import asyncpg
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 
+from app import catalog
 from app.config import Settings, get_settings
-from app.db import create_db_pool, db_connection
+from app.deps import DatabaseUnavailable, check_db, check_redis, ensure_db_pool, error
 from app.logging_config import setup_logging
 from app.redis_client import create_redis_client, create_redis_pool
 from app.request_id import RequestIdMiddleware
@@ -27,14 +27,6 @@ log = logging.getLogger(__name__)
 HOSTNAME = socket.gethostname()
 
 
-def error(status: int, detail: str, reason: str, retry_after: int | None = None) -> JSONResponse:
-    # reason — машиночитаемая причина: по одному коду клиент не поймёт, что делать.
-    headers = {"Retry-After": str(retry_after)} if retry_after is not None else None
-    return JSONResponse(
-        status_code=status, content={"detail": detail, "reason": reason}, headers=headers
-    )
-
-
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     setup_logging(settings.log_level)
@@ -42,14 +34,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         redis_pool = create_redis_pool(settings)
-        # Если Postgres недоступен при старте, воркер всё равно поднимается:
-        # health честно отвечает 503, а пул создаётся при первой возможности.
-        # Иначе gunicorn бесконечно перезапускал бы воркеры, и мы теряли бы
-        # даже ответы, которым база не нужна (статусы, кэшируемые данные).
         app.state.settings = settings
         app.state.redis = create_redis_client(redis_pool)
         app.state.db = None
         app.state.db_lock = asyncio.Lock()
+        # Если Postgres недоступен при старте, воркер всё равно поднимается:
+        # health честно отвечает 503, а пул создаётся при первой возможности.
+        # Иначе gunicorn бесконечно перезапускал бы воркеры.
         try:
             await ensure_db_pool(app)
         except DatabaseUnavailable:
@@ -65,10 +56,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="ticket-rush", lifespan=lifespan)
     app.add_middleware(RequestIdMiddleware)
+    app.include_router(catalog.router)
 
     # --- Сбои зависимостей -> 503, а не 500 ---------------------------------
-    # Недоступный Redis/Postgres или исчерпанный пул — это временная
-    # недоступность, а не ошибка в коде: клиенту 503 + Retry-After, повтор уместен.
+    # Недоступный Redis/Postgres или исчерпанный пул — временная недоступность,
+    # а не ошибка в коде: клиенту 503 + Retry-After, повтор уместен.
 
     @app.exception_handler(RedisError)
     async def redis_unavailable(request: Request, exc: RedisError) -> JSONResponse:
@@ -82,8 +74,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health(request: Request) -> JSONResponse:
-        # Обе зависимости проверяются параллельно: health вызывают часто (Docker
-        # раз в 15 с на каждую реплику), и он не должен ждать их по очереди.
+        # Параллельно: health вызывают часто, и он не должен ждать зависимости
+        # по очереди.
         redis_ok, db_ok = await asyncio.gather(
             check_redis(request.app), check_db(request.app)
         )
@@ -93,8 +85,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "database": "ok" if db_ok else "down",
             "hostname": HOSTNAME,
         }
-        # 503, а не 200 с "down" внутри: HEALTHCHECK Docker и мониторинг смотрят
-        # на код ответа.
+        # 503, а не 200 с "down" внутри: HEALTHCHECK и мониторинг смотрят на код.
         return JSONResponse(status_code=200 if redis_ok and db_ok else 503, content=body)
 
     @app.get("/api/debug/instance-info")
@@ -102,66 +93,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"hostname": HOSTNAME, "pid": os.getpid()}
 
     return app
-
-
-class DatabaseUnavailable(Exception):
-    """Postgres недоступен, пул не создан или исчерпан дольше таймаута."""
-
-
-# Ошибки СВЯЗИ с базой (а не ошибки в запросе вроде нарушения UNIQUE — те должны
-# обрабатываться бизнес-логикой): сеть, разорванное соединение, таймаут пула.
-DB_CONNECTION_ERRORS = (
-    OSError,
-    TimeoutError,
-    asyncpg.PostgresConnectionError,
-    asyncpg.InterfaceError,
-)
-
-
-async def ensure_db_pool(app: FastAPI) -> asyncpg.Pool:
-    if app.state.db is not None:
-        return app.state.db
-    # Лок, чтобы сотня одновременных запросов при недоступной БД не создавала
-    # сотню пулов наперегонки.
-    async with app.state.db_lock:
-        if app.state.db is None:
-            try:
-                app.state.db = await create_db_pool(app.state.settings)
-            except (OSError, asyncpg.PostgresError, TimeoutError) as exc:
-                log.warning("database_pool_create_failed", extra={"error": repr(exc)})
-                raise DatabaseUnavailable from exc
-    return app.state.db
-
-
-@asynccontextmanager
-async def db(request: Request) -> AsyncIterator[asyncpg.Connection]:
-    """Соединение с БД для обработчика; любые сбои связи -> DatabaseUnavailable."""
-    try:
-        pool = await ensure_db_pool(request.app)
-        async with db_connection(pool, request.app.state.settings) as connection:
-            yield connection
-    except DatabaseUnavailable:
-        raise
-    except DB_CONNECTION_ERRORS as exc:
-        raise DatabaseUnavailable from exc
-
-
-async def check_redis(app: FastAPI) -> bool:
-    try:
-        await app.state.redis.ping()
-        return True
-    except RedisError:
-        return False
-
-
-async def check_db(app: FastAPI) -> bool:
-    try:
-        pool = await ensure_db_pool(app)
-        async with db_connection(pool, app.state.settings) as connection:
-            await connection.fetchval("SELECT 1")
-        return True
-    except (DatabaseUnavailable, *DB_CONNECTION_ERRORS, asyncpg.PostgresError):
-        return False
 
 
 # Точка входа для `gunicorn app.main:app`. Соединений здесь не открывается —

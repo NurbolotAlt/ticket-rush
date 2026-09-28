@@ -1,0 +1,102 @@
+:root {
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --text: #1b1f24;
+  --muted: #69717d;
+  --border: #dcdfe4;
+  --accent: #3563e9;
+  --free: #2f9e5a;
+  --held: #d99a1e;
+  --sold: #a3a9b3;
+  --err: #c93a32;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121418;
+    --card: #1b1e24;
+    --text: #e7e9ec;
+    --muted: #8c94a0;
+    --border: #2c3139;
+    --accent: #7b9cf5;
+    --free: #45c07a;
+    --held: #e8b04a;
+    --sold: #555c66;
+    --err: #ef6b62;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+}
+.brand { font-weight: 700; color: var(--text); text-decoration: none; }
+.source { font-size: 12px; color: var(--muted); }
+
+.page { max-width: 1100px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 22px; margin: 8px 0 12px; }
+.muted { color: var(--muted); }
+.error { color: var(--err); }
+.back { color: var(--accent); text-decoration: none; font-size: 14px; }
+
+.events { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+.events a {
+  display: block;
+  padding: 14px 16px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  text-decoration: none;
+}
+.events a:hover { border-color: var(--accent); }
+.events .title { font-weight: 600; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0 16px; font-size: 13px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+
+.hall {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  overflow-x: auto;
+}
+.stage {
+  text-align: center;
+  font-size: 12px;
+  letter-spacing: 0.3em;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 6px;
+  margin-bottom: 16px;
+}
+.section { margin-bottom: 18px; }
+.section-title { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.row { display: flex; align-items: center; gap: 3px; margin-bottom: 3px; }
+.row-label { width: 22px; font-size: 10px; color: var(--muted); text-align: right; margin-right: 4px; }
+
+.seat {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--free);
+  flex: none;
+}
+.seat.held { background: var(--held); }
+.seat.sold { background: var(--sold); }
