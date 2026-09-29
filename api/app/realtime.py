@@ -19,51 +19,89 @@ log = logging.getLogger(__name__)
 
 # Медленный клиент (плохая сеть) не должен задерживать рассылку остальным.
 SEND_TIMEOUT_SECONDS = 2.0
+# Сколько сообщений может скопиться у клиента. Больше — он безнадёжно отстал:
+# отключаем, он переподключится и получит свежий снимок вместо сотни изменений.
+OUTBOX_LIMIT = 200
 RECONNECT_DELAY_SECONDS = 1.0
+
+
+class Client:
+    """WebSocket-клиент со СВОЕЙ очередью исходящих и одним отправителем.
+
+    Порядок важен: изменения схемы зала пронумерованы версиями, и клиент,
+    получивший 58 раньше 57, решит, что пропустил сообщение. Если рассылать
+    каждое сообщение отдельной задачей, две задачи могут отправить одному клиенту
+    в обратном порядке. Один отправитель на клиента сохраняет порядок, а очередь
+    изолирует медленного: остальные его не ждут.
+    """
+
+    def __init__(self, websocket: WebSocket) -> None:
+        self.websocket = websocket
+        self.outbox: asyncio.Queue[str] = asyncio.Queue(maxsize=OUTBOX_LIMIT)
+        self.sender: asyncio.Task | None = None
 
 
 class ConnectionManager:
     """WebSocket-клиенты ОДНОГО воркера, сгруппированные по концерту."""
 
     def __init__(self) -> None:
-        self._by_event: dict[int, set[WebSocket]] = defaultdict(set)
-        # asyncio держит на задачи только слабые ссылки — без этого множества
-        # незавершённую рассылку мог бы собрать сборщик мусора.
-        self._tasks: set[asyncio.Task] = set()
+        self._by_event: dict[int, set[Client]] = defaultdict(set)
 
     def count(self, event_id: int | None = None) -> int:
         if event_id is not None:
             return len(self._by_event.get(event_id, ()))
         return sum(len(clients) for clients in self._by_event.values())
 
-    def add(self, event_id: int, websocket: WebSocket) -> None:
-        self._by_event[event_id].add(websocket)
+    def add(self, event_id: int, websocket: WebSocket) -> Client:
+        client = Client(websocket)
+        client.sender = asyncio.create_task(self._send_loop(event_id, client))
+        self._by_event[event_id].add(client)
+        return client
 
-    def remove(self, event_id: int, websocket: WebSocket) -> None:
+    def remove(self, event_id: int, client: Client) -> None:
         clients = self._by_event.get(event_id)
         if clients is not None:
-            clients.discard(websocket)
+            clients.discard(client)
             if not clients:
                 del self._by_event[event_id]
+        if client.sender is not None and client.sender is not asyncio.current_task():
+            client.sender.cancel()
+
+    def send(self, event_id: int, client: Client, message: str) -> None:
+        try:
+            client.outbox.put_nowait(message)
+        except asyncio.QueueFull:
+            log.warning("ws_client_too_slow", extra={"event_id": event_id})
+            self.remove(event_id, client)
+            # Закрываем в фоне: нас вызвали синхронно из обработчика подписки.
+            asyncio.create_task(self._close(client))
 
     def broadcast_nowait(self, event_id: int, message: str) -> None:
-        """Для обработчика подписки: запустить рассылку и сразу вернуться."""
-        targets = list(self._by_event.get(event_id, ()))
-        if not targets:
-            return
-        task = asyncio.create_task(self._broadcast(event_id, targets, message))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        """Для обработчика подписки: разложить по очередям клиентов и вернуться."""
+        for client in list(self._by_event.get(event_id, ())):
+            self.send(event_id, client, message)
 
-    async def _broadcast(self, event_id: int, targets: list[WebSocket], message: str) -> None:
-        # Параллельно, с таймаутом на каждого: один зависший сокет не тормозит всех.
-        results = await asyncio.gather(
-            *(asyncio.wait_for(ws.send_text(message), SEND_TIMEOUT_SECONDS) for ws in targets),
-            return_exceptions=True,
-        )
-        for ws, result in zip(targets, results, strict=True):
-            if isinstance(result, BaseException):
-                self.remove(event_id, ws)
+    async def _send_loop(self, event_id: int, client: Client) -> None:
+        try:
+            while True:
+                message = await client.outbox.get()
+                await asyncio.wait_for(client.websocket.send_text(message), SEND_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Отвалился или не принял сообщение за SEND_TIMEOUT — убираем и
+            # закрываем соединение: иначе браузер считал бы себя подключённым,
+            # а изменения ему больше не шли бы. Он переподключится и получит снимок.
+            self.remove(event_id, client)
+            await self._close(client)
+
+    @staticmethod
+    async def _close(client: Client) -> None:
+        try:
+            # 1013 "Try Again Later": клиенту стоит переподключиться.
+            await client.websocket.close(code=1013)
+        except Exception:
+            pass
 
 
 class RedisSubscriber:

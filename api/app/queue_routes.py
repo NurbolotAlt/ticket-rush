@@ -13,7 +13,7 @@ import time
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Path, Request
 from fastapi.responses import JSONResponse, Response
 
 from app.deps import client_ip, db, error
@@ -26,8 +26,6 @@ router = APIRouter()
 
 EventId = Annotated[int, Path(ge=1)]
 
-# Как часто браузер подтверждает, что вкладка открыта (сообщение по WebSocket).
-HEARTBEAT_SECONDS = 15
 
 
 def personal(response: Response) -> Response:
@@ -121,28 +119,3 @@ async def queue_status(request: Request, event_id: EventId) -> Response:
     status = await request.app.state.room.status(event_id, session_id)
     return personal(JSONResponse(status))
 
-
-@router.websocket("/ws/events/{event_id}/queue")
-async def queue_updates(websocket: WebSocket, event_id: EventId) -> None:
-    """Состояние очереди концерта в реальном времени (одно общее для всех).
-
-    Клиент раз в HEARTBEAT_SECONDS присылает "ping" — это признак, что вкладка
-    открыта. Кто перестал присылать, того при подходе очереди пропустят.
-    """
-    manager = websocket.app.state.manager
-    room = websocket.app.state.room
-    session_id = current_session(websocket)
-    await websocket.accept()
-    manager.add(event_id, websocket)
-    try:
-        snapshot = await room.current_state(event_id)
-        if snapshot:
-            await websocket.send_text(snapshot)
-        while True:
-            await websocket.receive_text()
-            if session_id is not None:
-                await room.heartbeat(event_id, session_id)
-    except WebSocketDisconnect:
-        pass
-    finally:
-        manager.remove(event_id, websocket)

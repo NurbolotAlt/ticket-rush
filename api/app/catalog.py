@@ -88,11 +88,12 @@ async def get_event(request: Request, event_id: EventId) -> Response:
 
 @router.get("/{event_id}/seats")
 async def get_seatmap(request: Request, event_id: EventId) -> Response:
-    # Версию читаем ДО мест: если между чтениями что-то изменится, снимок окажется
-    # новее своей версии, и клиент просто повторно применит уже учтённое изменение
-    # (это безопасно). Обратный порядок дал бы снимок СТАРЕЕ версии — и клиент
-    # пропустил бы изменение навсегда.
-    version = int(await request.app.state.redis.get(seatmap_version_key(event_id)) or 0)
+    # Статусы и версию читаем ДО мест из базы (снимок — одной транзакцией Redis):
+    # если между чтениями что-то изменится, клиент получит это изменение по
+    # WebSocket и просто применит его. Обратный порядок дал бы схему СТАРЕЕ своей
+    # версии — и клиент пропустил бы изменение навсегда.
+    snapshot = await request.app.state.seats.snapshot(event_id)
+    held, sold = set(snapshot["held"]), set(snapshot["sold"])
     async with db(request) as connection:
         rows = await connection.fetch(
             "SELECT id, section, row_number, seat_number, price_cents FROM seats "
@@ -111,18 +112,23 @@ async def get_seatmap(request: Request, event_id: EventId) -> Response:
             {"name": row["section"], "price_cents": row["price_cents"], "rows": {}},
         )
         section["rows"].setdefault(row["row_number"], []).append(
-            # Статусы held/sold появятся на этапах 4 и 5; пока все места свободны.
-            [row["id"], row["seat_number"], "free"]
+            [row["id"], row["seat_number"], seat_status(row["id"], held, sold)]
         )
     body = {
         "event_id": event_id,
-        "version": version,
+        "version": snapshot["version"],
         "sections": [
             section | {"rows": [{"row": n, "seats": seats} for n, seats in section["rows"].items()]}
             for section in sections.values()
         ],
     }
     return cacheable(json_response(body), SEATMAP_MAX_AGE)
+
+
+def seat_status(seat_id: int, held: set[int], sold: set[int]) -> str:
+    if seat_id in sold:
+        return "sold"
+    return "held" if seat_id in held else "free"
 
 
 def not_found(event_id: int) -> Response:

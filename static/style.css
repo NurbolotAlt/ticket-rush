@@ -120,12 +120,29 @@ button:disabled { opacity: 0.6; cursor: progress; }
 .row { display: flex; align-items: center; gap: 3px; margin-bottom: 3px; }
 .row-label { width: 22px; font-size: 10px; color: var(--muted); text-align: right; margin-right: 4px; }
 
+.cart {
+  background: var(--card);
+  border: 1px solid var(--free);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin: 12px 0;
+  display: grid;
+  gap: 6px;
+}
+
 .seat {
   width: 14px;
   height: 14px;
+  padding: 0;
+  border: 0;
   border-radius: 3px;
   background: var(--free);
   flex: none;
+  cursor: pointer;
 }
+.seat:disabled { cursor: default; opacity: 1; }
 .seat.held { background: var(--held); }
 .seat.sold { background: var(--sold); }
+.seat.mine { background: var(--accent); }
+.seat.selected { outline: 2px solid var(--text); outline-offset: 1px; }
+.legend .seat { cursor: default; }

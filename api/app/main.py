@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 
-from app import catalog, queue_routes
+from app import catalog, holds_routes, queue_routes
 from app.admitter import Admitter
 from app.config import Settings, get_settings
 from app.deps import DatabaseUnavailable, check_db, check_redis, ensure_db_pool, error
@@ -24,6 +24,7 @@ from app.queue_routes import EventScheduleCache
 from app.realtime import ConnectionManager, RedisSubscriber, route_by_event
 from app.redis_client import create_redis_client, create_redis_pool
 from app.request_id import RequestIdMiddleware
+from app.seats import CHANGES_CHANNEL, SeatCatalog, SeatStore
 from app.waiting_room import STATE_CHANNEL, WaitingRoom
 
 log = logging.getLogger(__name__)
@@ -51,14 +52,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             pass  # уже залогировано; повторим при первом запросе к БД
 
         app.state.room = WaitingRoom(app.state.redis)
+        app.state.seats = SeatStore(app.state.redis)
+        app.state.seat_catalog = SeatCatalog()
         app.state.schedule = EventScheduleCache()
         app.state.manager = ConnectionManager()
-        # Одна подписка воркера: состояние очередей -> WebSocket-клиентам концерта.
+        # Одна подписка воркера на оба канала: состояние очередей и изменения мест
+        # -> WebSocket-клиентам нужного концерта.
+        route = route_by_event(app.state.manager)
         subscriber = RedisSubscriber(
-            app.state.redis, {STATE_CHANNEL: route_by_event(app.state.manager)}
+            app.state.redis, {STATE_CHANNEL: route, CHANGES_CHANNEL: route}
         )
         await subscriber.start()
-        app.state.admitter = Admitter(app, app.state.room, settings)
+        app.state.admitter = Admitter(app, app.state.room, app.state.seats, settings)
         if settings.admitter_enabled:
             app.state.admitter.start()
 
@@ -77,6 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(RequestIdMiddleware)
     app.include_router(catalog.router)
     app.include_router(queue_routes.router)
+    app.include_router(holds_routes.router)
 
     # --- Сбои зависимостей -> 503, а не 500 ---------------------------------
     # Недоступный Redis/Postgres или исчерпанный пул — временная недоступность,

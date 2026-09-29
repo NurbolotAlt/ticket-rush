@@ -23,6 +23,7 @@ from redis.exceptions import RedisError
 from app.config import Settings
 from app.deps import DatabaseUnavailable, db_for_app
 from app.leader import LeaderLease
+from app.seats import SeatStore
 from app.waiting_room import WaitingRoom
 
 log = logging.getLogger(__name__)
@@ -38,9 +39,12 @@ RATE_SMOOTHING = 0.3
 
 
 class Admitter:
-    def __init__(self, app: FastAPI, room: WaitingRoom, settings: Settings) -> None:
+    def __init__(
+        self, app: FastAPI, room: WaitingRoom, seats: SeatStore, settings: Settings
+    ) -> None:
         self._app = app
         self._room = room
+        self._seats = seats
         self._settings = settings
         identity = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.lease = LeaderLease(
@@ -98,6 +102,12 @@ class Admitter:
         if self.is_leader:
             for event_id in await self._events_on_sale():
                 await self._tick(event_id)
+                # Истёкшие брони освобождает тот же лидер: раз в тик, а не
+                # механизм истечения ключей Redis — тот удаляет ключи лениво, и
+                # "место освободилось" приходило бы зрителям непредсказуемо поздно.
+                freed = await self._seats.sweep_expired(event_id)
+                if freed:
+                    log.info("holds_expired", extra={"event_id": event_id, "seats": freed})
 
     async def _tick(self, event_id: int) -> None:
         s = self._settings
@@ -122,6 +132,9 @@ class Admitter:
         await self._room.save_state(
             event_id,
             {
+                # Тип нужен клиенту: по одному WebSocket приходят и состояние
+                # очереди, и изменения схемы зала.
+                "type": "queue",
                 "event_id": event_id,
                 "admitted_upto": result.admitted_upto,
                 "joined": joined,

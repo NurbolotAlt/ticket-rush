@@ -113,8 +113,12 @@ def test_websocket_receives_queue_state(settings, redis_url):
     # WebSocket-клиентов этого концерта и не доходит до клиентов другого.
     app = create_app(settings)
     publisher = sync_redis.Redis.from_url(redis_url)
-    with TestClient(app) as client, client.websocket_connect("/ws/events/7/queue") as ws:
-        publisher.publish(STATE_CHANNEL, json.dumps({"event_id": 8, "admitted_upto": 1}))
-        publisher.publish(STATE_CHANNEL, json.dumps({"event_id": 7, "admitted_upto": 42}))
+    with TestClient(app) as client, client.websocket_connect("/ws/events/7") as ws:
+        # Первым сервер присылает снимок статусов мест.
+        assert ws.receive_json()["type"] == "seats_snapshot"
+        publisher.publish(STATE_CHANNEL, json.dumps({"type": "queue", "event_id": 8}))
+        publisher.publish(
+            STATE_CHANNEL, json.dumps({"type": "queue", "event_id": 7, "admitted_upto": 42})
+        )
         assert ws.receive_json()["admitted_upto"] == 42
     publisher.close()

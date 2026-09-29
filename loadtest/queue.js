@@ -60,12 +60,14 @@ export default function () {
   let done = false;
 
   ws.connect(
-    `${WS_BASE}/ws/events/${EVENT_ID}/queue`,
+    `${WS_BASE}/ws/events/${EVENT_ID}`,
     // Cookie сессии браузер отправляет при открытии WebSocket сам; k6 — вручную.
     { headers: { ...headers, Cookie: `sid=${sid}` } },
     (socket) => {
       socket.on("message", (data) => {
         const state = JSON.parse(data);
+        // По одному соединению приходят и очередь, и изменения мест.
+        if (state.type !== "queue") return;
         if (!done && state.admitted_upto >= seq) {
           done = true;
           const waited = (Date.now() - joinedAt) / 1000;
