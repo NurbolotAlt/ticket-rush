@@ -118,7 +118,7 @@ async def event_updates(websocket: WebSocket, event_id: EventId) -> None:
     # Сначала подписываемся на изменения, ПОТОМ читаем снимок: изменение, случившееся
     # между этими шагами, придёт отдельным сообщением (и будет отброшено клиентом,
     # если уже вошло в снимок). В обратном порядке его можно было бы потерять.
-    client = manager.add(event_id, websocket)
+    client = manager.add(event_id, websocket, session_id)
     try:
         queue_state = await room.current_state(event_id)
         if queue_state:

@@ -61,3 +61,18 @@ async def test_stuck_client_is_dropped_without_delaying_others():
     # Быстрый получил всё; зависший отключён (1013 — "переподключитесь позже").
     assert manager.count(1) == 1
     assert stuck.closed_with == 1013
+
+
+async def test_personal_message_reaches_only_that_session():
+    manager = ConnectionManager()
+    mine_tab1, mine_tab2, stranger = FakeWebSocket(), FakeWebSocket(), FakeWebSocket()
+    manager.add(1, mine_tab1, "alice")
+    manager.add(1, mine_tab2, "alice")  # вторая вкладка той же сессии
+    manager.add(1, stranger, "bob")
+
+    manager.send_to_session("alice", "ваши билеты готовы")
+    await mine_tab1.wait_received(1)
+    await mine_tab2.wait_received(1)
+    await asyncio.sleep(0.05)
+
+    assert stranger.received == []

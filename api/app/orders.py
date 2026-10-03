@@ -10,6 +10,7 @@
   3. списать деньги (провайдер идемпотентен по id заказа)
   4. ОДНА транзакция в базе: билеты + заказ 'paid'
   5. отметить места проданными в Redis (не удалось — догонит сверка с базой)
+  6. поставить задачу на PDF-билеты (не удалось — поставит заново сверка лидера)
 
 База — источник правды. Redis — быстрая копия для броней и схемы зала.
 """
@@ -26,6 +27,7 @@ from redis.exceptions import RedisError
 
 from app.deps import db_for_app
 from app.payments import PaymentDeclined
+from app.ticket_jobs import enqueue_ticket_pdf
 
 log = logging.getLogger(__name__)
 
@@ -139,6 +141,14 @@ async def place_order(
         # (лидер раз в 10 с переносит проданные места из базы в Redis).
         log.warning("mark_sold_failed_will_reconcile", extra=ctx, exc_info=True)
 
+    # --- 6. PDF-билеты — в фоновую очередь. Ответ покупателю не ждёт рендеринга.
+    try:
+        await enqueue_ticket_pdf(app.state.redis, order_id)
+    except RedisError:
+        # Заказ оплачен (pdf_status = 'pending'), а задача не поставлена — её
+        # поставит заново сверка лидера, найдя заказ без PDF.
+        log.warning("ticket_pdf_enqueue_failed", extra=ctx, exc_info=True)
+
     log.info("order_paid", extra=ctx | {"seats": seat_ids, "amount_cents": priced["amount"]})
     return OrderResult(201, await order_body_by_id(app, order_id))
 
@@ -212,6 +222,10 @@ async def order_body(connection: asyncpg.Connection, order) -> dict:
         "amount_cents": order["amount_cents"],
         "seat_ids": sorted(order["seat_ids"]),
         "tickets": [{"seat_id": t["seat_id"], "code": t["code"]} for t in tickets],
+        "pdf_status": order["pdf_status"],
+        "pdf_url": (
+            f"/api/orders/{order['id']}/tickets.pdf" if order["pdf_status"] == "ready" else None
+        ),
     }
 
 

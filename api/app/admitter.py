@@ -24,6 +24,7 @@ from app.config import Settings
 from app.deps import DatabaseUnavailable, db_for_app
 from app.leader import LeaderLease
 from app.seats import SeatStore
+from app.ticket_jobs import enqueue_ticket_pdf
 from app.waiting_room import WaitingRoom
 
 log = logging.getLogger(__name__)
@@ -188,6 +189,7 @@ class Admitter:
         if now - self._abandon_checked_at > ABANDON_CHECK_SECONDS:
             self._abandon_checked_at = now
             await self.abandon_stale_orders()
+            await self.requeue_missing_pdfs()
 
     async def reconcile_sold(self, event_id: int) -> int:
         """Проданные места из базы (источник правды) — в Redis, если их там нет.
@@ -226,6 +228,32 @@ class Admitter:
             refunded = await self._app.state.payments.refund(order_id)
             log.warning("order_abandoned", extra={"order_id": order_id, "refunded": refunded})
         return abandoned
+
+    async def requeue_missing_pdfs(self) -> list[int]:
+        """Оплаченные заказы без PDF дольше 5 минут — снова в очередь генерации.
+
+        Покупка ставит задачу ПОСЛЕ записи в базу; если постановка не удалась,
+        без этой сверки заказ остался бы без билета навсегда. updated_at
+        сдвигается, чтобы не ставить ту же задачу каждые 30 секунд.
+        """
+        async with db_for_app(self._app) as connection:
+            rows = await connection.fetch(
+                """
+                UPDATE orders SET updated_at = now()
+                WHERE id IN (
+                    SELECT id FROM orders
+                    WHERE status = 'paid' AND pdf_status = 'pending'
+                      AND updated_at < now() - interval '5 minutes'
+                    LIMIT 100
+                )
+                RETURNING id
+                """
+            )
+        for row in rows:
+            await enqueue_ticket_pdf(self._app.state.redis, row["id"])
+        if rows:
+            log.warning("ticket_pdfs_requeued", extra={"orders": len(rows)})
+        return [row["id"] for row in rows]
 
     async def _events_on_sale(self) -> list[int]:
         if time.monotonic() - self._open_events_at > OPEN_EVENTS_REFRESH_SECONDS:

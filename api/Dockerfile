@@ -18,9 +18,10 @@ RUN pip install -r requirements.txt
 # Стадия 2: только интерпретатор, готовый venv и код.
 FROM python:3.12-slim
 
-# curl — только для HEALTHCHECK.
+# curl — только для HEALTHCHECK. fonts-dejavu-core — шрифт с кириллицей для
+# PDF-билетов (воркер использует тот же образ, что и API).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Непривилегированный пользователь: уязвимость в приложении даёт атакующему права

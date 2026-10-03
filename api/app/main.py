@@ -22,10 +22,16 @@ from app.deps import DatabaseUnavailable, check_db, check_redis, ensure_db_pool,
 from app.logging_config import setup_logging
 from app.payments import FakePaymentProvider
 from app.queue_routes import EventScheduleCache
-from app.realtime import ConnectionManager, RedisSubscriber, route_by_event
+from app.realtime import (
+    ConnectionManager,
+    RedisSubscriber,
+    route_by_event,
+    route_to_session,
+)
 from app.redis_client import create_redis_client, create_redis_pool
 from app.request_id import RequestIdMiddleware
 from app.seats import CHANGES_CHANNEL, SeatCatalog, SeatStore
+from app.ticket_jobs import ORDERS_CHANNEL
 from app.waiting_room import STATE_CHANNEL, WaitingRoom
 
 log = logging.getLogger(__name__)
@@ -60,11 +66,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         app.state.schedule = EventScheduleCache()
         app.state.manager = ConnectionManager()
-        # Одна подписка воркера на оба канала: состояние очередей и изменения мест
-        # -> WebSocket-клиентам нужного концерта.
+        # Одна подписка воркера на все каналы: состояние очередей и изменения мест
+        # -> зрителям концерта, личные уведомления о заказах -> вкладкам сессии.
         route = route_by_event(app.state.manager)
         subscriber = RedisSubscriber(
-            app.state.redis, {STATE_CHANNEL: route, CHANGES_CHANNEL: route}
+            app.state.redis,
+            {
+                STATE_CHANNEL: route,
+                CHANGES_CHANNEL: route,
+                ORDERS_CHANNEL: route_to_session(app.state.manager),
+            },
         )
         await subscriber.start()
         app.state.admitter = Admitter(app, app.state.room, app.state.seats, settings)

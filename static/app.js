@@ -89,6 +89,7 @@ const live = {
       if (message.type === "queue") queue.onBroadcast(message);
       else if (message.type === "seats_snapshot") hall.applySnapshot(message);
       else if (message.type === "seats") hall.applyChanges(message);
+      else if (message.type === "order") hall.onOrderUpdate(message);
     };
     ws.onclose = () => {
       // Реплика перезапустилась или сеть моргнула — переподключаемся с растущей
@@ -428,7 +429,11 @@ const hall = {
     }
   },
 
+  orderId: null,
+  pdfPoll: null,
+
   showTickets(order) {
+    this.orderId = order.order_id;
     this.setMine([], null);
     queue.close();
     this.setSelectable(false);
@@ -441,6 +446,37 @@ const hall = {
         el("code", null, ticket.code));
       return item;
     }));
+    this.showPdf(order);
+  },
+
+  // PDF рендерит фоновый воркер: обычно о готовности сообщает WebSocket (личное
+  // сообщение этой сессии). Запасной путь — изредка спросить статус заказа:
+  // Pub/Sub не гарантирует доставку.
+  showPdf(order) {
+    clearInterval(this.pdfPoll);
+    const box = $("tickets-pdf");
+    if (order.pdf_url) {
+      const link = el("a", null, "Скачать билеты (PDF)");
+      link.href = order.pdf_url;
+      link.target = "_blank";
+      box.replaceChildren(link);
+      return;
+    }
+    if (order.pdf_status === "failed") {
+      box.textContent = "Не удалось подготовить PDF — коды билетов выше действительны.";
+      return;
+    }
+    box.textContent = "PDF с QR-кодами готовится…";
+    this.pdfPoll = setInterval(async () => {
+      const { data } = await getJson(`/api/orders/${order.order_id}`).catch(() => ({ data: null }));
+      if (data && data.pdf_status !== "pending") this.showPdf(data);
+    }, 3000);
+  },
+
+  async onOrderUpdate(message) {
+    if (message.order_id !== this.orderId) return;
+    const { data } = await getJson(`/api/orders/${message.order_id}`);
+    this.showPdf(data);
   },
 
   renderCart(clearNote = true) {

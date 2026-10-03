@@ -35,8 +35,12 @@ class Client:
     изолирует медленного: остальные его не ждут.
     """
 
-    def __init__(self, websocket: WebSocket) -> None:
+    def __init__(self, websocket: WebSocket, event_id: int, session_id: str | None) -> None:
         self.websocket = websocket
+        self.event_id = event_id
+        # По сессии находим вкладки покупателя для ЛИЧНЫХ сообщений ("ваши билеты
+        # готовы") — они не должны уходить всем зрителям концерта.
+        self.session_id = session_id
         self.outbox: asyncio.Queue[str] = asyncio.Queue(maxsize=OUTBOX_LIMIT)
         self.sender: asyncio.Task | None = None
 
@@ -46,16 +50,19 @@ class ConnectionManager:
 
     def __init__(self) -> None:
         self._by_event: dict[int, set[Client]] = defaultdict(set)
+        self._by_session: dict[str, set[Client]] = defaultdict(set)
 
     def count(self, event_id: int | None = None) -> int:
         if event_id is not None:
             return len(self._by_event.get(event_id, ()))
         return sum(len(clients) for clients in self._by_event.values())
 
-    def add(self, event_id: int, websocket: WebSocket) -> Client:
-        client = Client(websocket)
+    def add(self, event_id: int, websocket: WebSocket, session_id: str | None = None) -> Client:
+        client = Client(websocket, event_id, session_id)
         client.sender = asyncio.create_task(self._send_loop(event_id, client))
         self._by_event[event_id].add(client)
+        if session_id is not None:
+            self._by_session[session_id].add(client)
         return client
 
     def remove(self, event_id: int, client: Client) -> None:
@@ -64,6 +71,12 @@ class ConnectionManager:
             clients.discard(client)
             if not clients:
                 del self._by_event[event_id]
+        if client.session_id is not None:
+            mine = self._by_session.get(client.session_id)
+            if mine is not None:
+                mine.discard(client)
+                if not mine:
+                    del self._by_session[client.session_id]
         if client.sender is not None and client.sender is not asyncio.current_task():
             client.sender.cancel()
 
@@ -80,6 +93,11 @@ class ConnectionManager:
         """Для обработчика подписки: разложить по очередям клиентов и вернуться."""
         for client in list(self._by_event.get(event_id, ())):
             self.send(event_id, client, message)
+
+    def send_to_session(self, session_id: str, message: str) -> None:
+        """Личное сообщение — во все вкладки этой сессии (на этом воркере)."""
+        for client in list(self._by_session.get(session_id, ())):
+            self.send(client.event_id, client, message)
 
     async def _send_loop(self, event_id: int, client: Client) -> None:
         try:
@@ -175,6 +193,20 @@ class RedisSubscriber:
             self._handlers[channel](data)
         except Exception:
             log.exception("pubsub_handler_failed", extra={"channel": channel})
+
+
+def route_to_session(manager: ConnectionManager) -> Callable[[str], None]:
+    """Обработчик канала личных сообщений: {"session_id": ..., "payload": {...}}.
+
+    Сообщение получают ВСЕ воркеры (вкладка покупателя может быть подключена к
+    любому), но доставляет только тот, у кого есть сокеты этой сессии.
+    """
+
+    def handle(raw: str) -> None:
+        message = json.loads(raw)
+        manager.send_to_session(message["session_id"], json.dumps(message["payload"]))
+
+    return handle
 
 
 def route_by_event(manager: ConnectionManager) -> Callable[[str], None]:

@@ -3,8 +3,8 @@
 # Секреты и параметры — в .env рядом (см. .env.example); compose читает его сам.
 #
 # Ёмкость соединений PostgreSQL — считается по всей системе, не по одному воркеру:
-#   реплики API × WEB_CONCURRENCY × DB_POOL_MAX  (+ init, + worker на этапе 6)
-#   2 × 2 × 10 = 40  <  max_connections = 100
+#   реплики API × WEB_CONCURRENCY × DB_POOL_MAX  +  воркеры × 3  (+ init)
+#   2 × 2 × 10 + 2 × 3 = 46  <  max_connections = 100
 # Каждое соединение Postgres — отдельный серверный процесс (~10 МБ). Превысить
 # max_connections — получить отказы в подключении под нагрузкой, как раз когда
 # они нужнее всего.
@@ -66,6 +66,32 @@ services:
     # Docker ждёт stop_grace_period после SIGTERM, потом SIGKILL. Должно быть
     # больше gunicorn --graceful-timeout (30 с).
     stop_grace_period: 40s
+    logging: *default-logging
+
+  # Фоновая генерация PDF-билетов: читает задачи из Redis Stream, рендерит в пуле
+  # процессов. Отдельно от API — тяжёлая CPU-работа не отнимает процессор у
+  # запросов во время распродажи и масштабируется сама по себе:
+  #   docker compose up -d --scale worker=2
+  worker:
+    image: ticket-rush-api:local
+    pull_policy: never
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: *database-url
+      REDIS_URL: redis://redis:6379/0
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    # У воркера нет HTTP — HEALTHCHECK образа (curl /api/health) к нему не
+    # относится. Живость видна по логам и длине очереди.
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    # SIGTERM: воркер перестаёт брать задачи и доделывает начатые.
+    stop_grace_period: 30s
     logging: *default-logging
 
   # Одноразовый контейнер: миграции + наполнение зала, затем выход с кодом 0.

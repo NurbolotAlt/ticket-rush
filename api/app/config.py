@@ -81,6 +81,27 @@ class Settings(BaseSettings):
     join_rate_limit_per_ip_per_minute: int = 60
 
 
+class WorkerSettings(BaseSettings):
+    """Настройки фонового воркера генерации билетов (python -m app.worker).
+
+    Отдельно от Settings по той же причине, что и SeedSettings: воркеру не нужен
+    ключ сессий — он не работает с браузерами.
+    """
+
+    database_url: str = "postgresql://ticket:ticket@localhost:5432/ticket"
+    redis_url: str = "redis://localhost:6379/0"
+    # Процессов рендеринга PDF на один контейнер воркера. PDF — CPU-работа,
+    # поэтому процессы (из-за GIL), и их число — от ядер, как в compute-service.
+    worker_concurrency: int = 2
+    # Задача, взятая воркером и не подтверждённая за столько миллисекунд
+    # (воркер упал или завис), достаётся другому воркеру.
+    worker_claim_idle_ms: int = 60_000
+    # После стольких неудачных попыток задача уходит в поток "мёртвых" задач.
+    worker_max_attempts: int = 5
+    # Шрифт с кириллицей для PDF. В образе — DejaVu из пакета fonts-dejavu-core.
+    pdf_font_path: str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+
 class SeedSettings(BaseSettings):
     """Настройки наполнения зала (python -m app.seed в контейнере init).
 
