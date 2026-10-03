@@ -15,11 +15,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 
-from app import catalog, holds_routes, queue_routes
+from app import catalog, holds_routes, orders_routes, queue_routes
 from app.admitter import Admitter
 from app.config import Settings, get_settings
 from app.deps import DatabaseUnavailable, check_db, check_redis, ensure_db_pool, error
 from app.logging_config import setup_logging
+from app.payments import FakePaymentProvider
 from app.queue_routes import EventScheduleCache
 from app.realtime import ConnectionManager, RedisSubscriber, route_by_event
 from app.redis_client import create_redis_client, create_redis_pool
@@ -54,6 +55,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.room = WaitingRoom(app.state.redis)
         app.state.seats = SeatStore(app.state.redis)
         app.state.seat_catalog = SeatCatalog()
+        app.state.payments = FakePaymentProvider(
+            app.state.redis, settings.fake_payment_latency_ms, settings.fake_payment_failure_rate
+        )
         app.state.schedule = EventScheduleCache()
         app.state.manager = ConnectionManager()
         # Одна подписка воркера на оба канала: состояние очередей и изменения мест
@@ -83,6 +87,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(catalog.router)
     app.include_router(queue_routes.router)
     app.include_router(holds_routes.router)
+    app.include_router(orders_routes.router)
 
     # --- Сбои зависимостей -> 503, а не 500 ---------------------------------
     # Недоступный Redis/Postgres или исчерпанный пул — временная недоступность,

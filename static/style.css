@@ -130,6 +130,20 @@ button:disabled { opacity: 0.6; cursor: progress; }
   gap: 6px;
 }
 
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+button.pay { background: var(--free); border-color: var(--free); }
+
+.tickets {
+  background: var(--card);
+  border: 1px solid var(--free);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin: 12px 0;
+}
+.tickets .queue-text { color: var(--free); }
+.tickets ul { margin: 8px 0 0; padding-left: 18px; }
+.tickets code { font-size: 13px; }
+
 .seat {
   width: 14px;
   height: 14px;

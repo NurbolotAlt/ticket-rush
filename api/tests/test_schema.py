@@ -54,6 +54,46 @@ async def test_negative_price_rejected(db):
         )
 
 
+async def make_order(db, event_id) -> int:
+    return await db.fetchval(
+        "INSERT INTO orders (event_id, session_id, idempotency_key, request_hash, status, "
+        "amount_cents, seat_ids) VALUES ($1, 's', $2, 'h', 'paid', 0, '{}') RETURNING id",
+        event_id,
+        f"key-{event_id}-{await db.fetchval('SELECT count(*) FROM orders')}",
+    )
+
+
+async def make_seat(db, event_id) -> int:
+    return await db.fetchval(
+        "INSERT INTO seats (event_id, section, row_number, seat_number, price_cents) "
+        "VALUES ($1, 'A', 1, 1, 100) RETURNING id",
+        event_id,
+    )
+
+
+async def test_one_seat_one_ticket(db):
+    # Главная гарантия на уровне базы: второй билет на то же место невозможен.
+    event_id = await insert_event(db)
+    seat = await make_seat(db, event_id)
+    insert = "INSERT INTO tickets (order_id, event_id, seat_id, code) VALUES ($1, $2, $3, $4)"
+    await db.execute(insert, await make_order(db, event_id), event_id, seat, "c1")
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await db.execute(insert, await make_order(db, event_id), event_id, seat, "c2")
+
+
+async def test_ticket_cannot_point_to_seat_of_another_event(db):
+    event_a = await insert_event(db, slug="a")
+    event_b = await insert_event(db, slug="b")
+    seat_of_a = await make_seat(db, event_a)
+    with pytest.raises(asyncpg.ForeignKeyViolationError):
+        await db.execute(
+            "INSERT INTO tickets (order_id, event_id, seat_id, code) VALUES ($1, $2, $3, 'c')",
+            await make_order(db, event_b),
+            event_b,
+            seat_of_a,
+        )
+
+
 async def test_deleting_event_deletes_its_seats(db):
     event_id = await insert_event(db)
     await db.execute(

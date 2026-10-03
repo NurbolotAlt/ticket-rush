@@ -143,6 +143,77 @@ return #expired
 """
 
 
+# Перед оплатой: проверить, что сессия держит РОВНО эти места и брони живы, и
+# продлить их на время платежа. Без продления бронь могла бы истечь, пока банк
+# думает, и место ушло бы другому покупателю, за которое мы уже взяли деньги.
+_LOCK_FOR_PAYMENT = """
+local held, owner, by = KEYS[1], KEYS[2], KEYS[3]
+local sid, now, window = ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3])
+local requested = {}
+for i = 4, #ARGV do requested[ARGV[i]] = true end
+
+local mine = 0
+for _, seat in ipairs(redis.call('SMEMBERS', by)) do
+    local expires = redis.call('ZSCORE', held, seat)
+    if expires and tonumber(expires) > now and redis.call('HGET', owner, seat) == sid then
+        if not requested[seat] then return 'mismatch' end
+        mine = mine + 1
+    end
+end
+if mine ~= #ARGV - 3 then return 'mismatch' end
+
+for seat, _ in pairs(requested) do
+    local expires = tonumber(redis.call('ZSCORE', held, seat))
+    if expires < now + window then
+        redis.call('ZADD', held, now + window, seat)
+    end
+end
+return 'ok'
+"""
+
+# После того как билеты записаны в базу: места проданы, брони и пропуск сняты
+# (пропуск освобождает место для следующего в очереди), зрителям — изменение.
+_MARK_SOLD = """
+local held, owner, by, sold, version, active = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
+local sid, event_id = ARGV[1], tonumber(ARGV[2])
+local changes = {}
+for i = 3, #ARGV do
+    local seat = ARGV[i]
+    redis.call('SADD', sold, seat)
+    redis.call('ZREM', held, seat)
+    redis.call('HDEL', owner, seat)
+    redis.call('SREM', by, seat)
+    table.insert(changes, {tonumber(seat), 'sold'})
+end
+redis.call('ZREM', active, sid)
+local v = redis.call('INCR', version)
+redis.call('PUBLISH', 'seats:changes', cjson.encode(
+    {type = 'seats', event_id = event_id, version = v, changes = changes}))
+return v
+"""
+
+# Сверка с базой: проданные места, которых нет в Redis (запись в Redis после
+# покупки не удалась, Redis перезапустился без данных), — добавить и разослать.
+_RESTORE_SOLD = """
+local held, owner, sold, version = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
+local event_id = tonumber(ARGV[1])
+local changes = {}
+for i = 2, #ARGV do
+    local seat = ARGV[i]
+    if redis.call('SADD', sold, seat) == 1 then
+        redis.call('ZREM', held, seat)
+        redis.call('HDEL', owner, seat)
+        table.insert(changes, {tonumber(seat), 'sold'})
+    end
+end
+if #changes == 0 then return 0 end
+local v = redis.call('INCR', version)
+redis.call('PUBLISH', 'seats:changes', cjson.encode(
+    {type = 'seats', event_id = event_id, version = v, changes = changes}))
+return #changes
+"""
+
+
 class HoldError(Exception):
     def __init__(self, reason: str, seats: list[int] | None = None) -> None:
         super().__init__(reason)
@@ -156,6 +227,42 @@ class SeatStore:
         self._hold = redis.register_script(_HOLD)
         self._release = redis.register_script(_RELEASE)
         self._sweep = redis.register_script(_SWEEP)
+        self._lock_for_payment = redis.register_script(_LOCK_FOR_PAYMENT)
+        self._mark_sold = redis.register_script(_MARK_SOLD)
+        self._restore_sold = redis.register_script(_RESTORE_SOLD)
+
+    async def lock_for_payment(
+        self, event_id: int, session_id: str, seat_ids: list[int], window_ms: int
+    ) -> bool:
+        """True — сессия держит ровно эти места, брони продлены на время оплаты."""
+        k = keys(event_id, session_id)
+        result = await self._lock_for_payment(
+            keys=[k["held"], k["owner"], k["by"]],
+            args=[session_id, now_ms(), window_ms, *seat_ids],
+        )
+        return result == "ok"
+
+    async def mark_sold(self, event_id: int, session_id: str, seat_ids: list[int]) -> int:
+        k = keys(event_id, session_id)
+        return int(
+            await self._mark_sold(
+                keys=[k["held"], k["owner"], k["by"], k["sold"], k["version"],
+                      queue_keys(event_id)["active"]],
+                args=[session_id, event_id, *seat_ids],
+            )
+        )
+
+    async def restore_sold(self, event_id: int, seat_ids: list[int]) -> int:
+        """Сколько проданных мест не хватало в Redis (и теперь добавлено)."""
+        if not seat_ids:
+            return 0
+        k = keys(event_id)
+        return int(
+            await self._restore_sold(
+                keys=[k["held"], k["owner"], k["sold"], k["version"]],
+                args=[event_id, *seat_ids],
+            )
+        )
 
     async def hold(
         self, event_id: int, session_id: str, seat_ids: list[int], ttl_ms: int, max_seats: int

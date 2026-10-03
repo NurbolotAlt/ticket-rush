@@ -95,9 +95,12 @@ async def get_seatmap(request: Request, event_id: EventId) -> Response:
     snapshot = await request.app.state.seats.snapshot(event_id)
     held, sold = set(snapshot["held"]), set(snapshot["sold"])
     async with db(request) as connection:
+        # "Продано" — из базы (источник правды), "забронировано" — из Redis.
         rows = await connection.fetch(
-            "SELECT id, section, row_number, seat_number, price_cents FROM seats "
-            "WHERE event_id = $1 ORDER BY section, row_number, seat_number",
+            "SELECT s.id, s.section, s.row_number, s.seat_number, s.price_cents, "
+            "       t.id IS NOT NULL AS sold "
+            "FROM seats s LEFT JOIN tickets t ON t.event_id = s.event_id AND t.seat_id = s.id "
+            "WHERE s.event_id = $1 ORDER BY s.section, s.row_number, s.seat_number",
             event_id,
         )
     if not rows:
@@ -112,7 +115,7 @@ async def get_seatmap(request: Request, event_id: EventId) -> Response:
             {"name": row["section"], "price_cents": row["price_cents"], "rows": {}},
         )
         section["rows"].setdefault(row["row_number"], []).append(
-            [row["id"], row["seat_number"], seat_status(row["id"], held, sold)]
+            [row["id"], row["seat_number"], seat_status(row["id"], row["sold"], held, sold)]
         )
     body = {
         "event_id": event_id,
@@ -125,8 +128,8 @@ async def get_seatmap(request: Request, event_id: EventId) -> Response:
     return cacheable(json_response(body), SEATMAP_MAX_AGE)
 
 
-def seat_status(seat_id: int, held: set[int], sold: set[int]) -> str:
-    if seat_id in sold:
+def seat_status(seat_id: int, sold_in_db: bool, held: set[int], sold: set[int]) -> str:
+    if sold_in_db or seat_id in sold:
         return "sold"
     return "held" if seat_id in held else "free"
 

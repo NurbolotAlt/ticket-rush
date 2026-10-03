@@ -380,9 +380,73 @@ const hall = {
     }
   },
 
+  // Ключ идемпотентности живёт, пока длится ОДНА попытка оплаты. Повтор после
+  // обрыва сети или 503 идёт с тем же ключом — если первая попытка на самом деле
+  // прошла, сервер вернёт её результат, а не спишет деньги второй раз. Новый ключ
+  // — только для новой попытки (банк отказал, бронь истекла).
+  checkoutKey: null,
+
+  async pay() {
+    const seatIds = [...this.mine].sort((a, b) => a - b);
+    this.checkoutKey ??= crypto.randomUUID();
+    $("pay-btn").disabled = true;
+    $("cart-note").textContent = "Оплачиваем…";
+    try {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        let response, body;
+        try {
+          response = await fetch(`/api/events/${this.eventId}/orders`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Idempotency-Key": this.checkoutKey },
+            body: JSON.stringify({ seat_ids: seatIds }),
+          });
+          body = await response.json().catch(() => null);
+        } catch {
+          // Сеть оборвалась: мы не знаем, прошла ли оплата. Повторяем С ТЕМ ЖЕ ключом.
+          await new Promise((r) => setTimeout(r, 1000));
+          continue;
+        }
+        if (response.ok) {
+          this.checkoutKey = null;
+          return this.showTickets(body);
+        }
+        const inProgress = response.status === 409 && body?.reason === "order_in_progress";
+        if (inProgress || response.status === 503) {
+          const wait = Number(response.headers.get("Retry-After") || 1);
+          await new Promise((r) => setTimeout(r, wait * 1000));
+          continue;
+        }
+        // Окончательный отказ: следующая попытка будет новой — с новым ключом.
+        this.checkoutKey = null;
+        $("cart-note").textContent = body?.detail || `Ошибка ${response.status}`;
+        if (body?.reason === "holds_mismatch") this.loadMine();
+        return;
+      }
+      $("cart-note").textContent = "Не удалось связаться с сервером — попробуйте ещё раз.";
+    } finally {
+      $("pay-btn").disabled = false;
+    }
+  },
+
+  showTickets(order) {
+    this.setMine([], null);
+    queue.close();
+    this.setSelectable(false);
+    $("queue").hidden = true;
+    $("tickets").hidden = false;
+    $("tickets-meta").textContent = `Заказ №${order.order_id} · ${money(order.amount_cents)}`;
+    $("tickets-list").replaceChildren(...order.tickets.map((ticket) => {
+      const item = el("li");
+      item.append(`${this.seats.get(ticket.seat_id)?.label ?? `Место ${ticket.seat_id}`} — код `,
+        el("code", null, ticket.code));
+      return item;
+    }));
+  },
+
   renderCart(clearNote = true) {
     const cart = $("cart");
     cart.hidden = !this.selectable;
+    $("pay-btn").hidden = !this.selectable || this.mine.size === 0;
     if (!this.selectable) return;
     if (clearNote) $("cart-note").textContent = "";
     const total = [...this.mine].reduce((sum, id) => sum + (this.seats.get(id)?.price || 0), 0);
@@ -429,6 +493,8 @@ async function showEvents() {
 async function showEvent(eventId) {
   $("events-view").hidden = true;
   $("event-view").hidden = false;
+  $("queue").hidden = false;
+  $("tickets").hidden = true;
   // Карточка и схема — параллельно: два независимых кэшируемых запроса.
   const [{ data: event }, { data: seatmap, cache }] = await Promise.all([
     getJson(`/api/events/${eventId}`),
@@ -464,6 +530,7 @@ async function route() {
 
 $("queue-btn").addEventListener("click", () => queue.join());
 $("cart-btn").addEventListener("click", () => hall.holdSelected());
+$("pay-btn").addEventListener("click", () => hall.pay());
 $("back").addEventListener("click", (e) => { e.preventDefault(); location.hash = ""; });
 window.addEventListener("hashchange", route);
 route();

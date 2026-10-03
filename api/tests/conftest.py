@@ -85,6 +85,8 @@ def settings(migrated, redis_url) -> Settings:
         session_cookie_secure=False,
         # Тики впускателя тесты вызывают сами.
         admitter_enabled=False,
+        # Имитация банка без задержки — тесты не ждут "сеть".
+        fake_payment_latency_ms=0,
     )
 
 

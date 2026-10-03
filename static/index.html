@@ -34,7 +34,16 @@
         <div id="cart-mine"></div>
         <div id="cart-timer" class="muted small"></div>
         <div id="cart-note" class="error small"></div>
-        <button id="cart-btn" type="button" hidden>Забронировать</button>
+        <div class="actions">
+          <button id="cart-btn" type="button" hidden>Забронировать</button>
+          <button id="pay-btn" type="button" class="pay" hidden>Оплатить</button>
+        </div>
+      </div>
+
+      <div id="tickets" class="tickets" hidden>
+        <div class="queue-text">Билеты куплены!</div>
+        <div id="tickets-meta" class="muted small"></div>
+        <ul id="tickets-list"></ul>
       </div>
 
       <div id="legend" class="legend"></div>

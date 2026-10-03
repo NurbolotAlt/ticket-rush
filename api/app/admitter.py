@@ -33,6 +33,10 @@ LEADER_KEY = "leader:admitter"
 # столько секунд: он меняется редко, а база не должна получать запрос в секунду
 # от лидера просто так.
 OPEN_EVENTS_REFRESH_SECONDS = 10
+# Сверка проданных мест база -> Redis и уборка зависших заказов: редкие фоновые
+# работы, которым достаточно одного исполнителя на кластер — того же лидера.
+RECONCILE_SECONDS = 10
+ABANDON_CHECK_SECONDS = 30
 # Сглаживание измеренной скорости впуска: новое значение весит 30%. Так ETA не
 # скачет от тика к тику, но быстро реагирует на замедление (кончилась ёмкость).
 RATE_SMOOTHING = 0.3
@@ -54,6 +58,8 @@ class Admitter:
         self._rates: dict[int, float] = {}
         self._open_events: list[int] = []
         self._open_events_at = 0.0
+        self._reconciled_at = 0.0
+        self._abandon_checked_at = 0.0
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
@@ -108,6 +114,7 @@ class Admitter:
                 freed = await self._seats.sweep_expired(event_id)
                 if freed:
                     log.info("holds_expired", extra={"event_id": event_id, "seats": freed})
+            await self._maintenance()
 
     async def _tick(self, event_id: int) -> None:
         s = self._settings
@@ -171,6 +178,54 @@ class Admitter:
         rate = previous * (1 - RATE_SMOOTHING) + per_second * RATE_SMOOTHING
         self._rates[event_id] = rate
         return rate
+
+    async def _maintenance(self) -> None:
+        now = time.monotonic()
+        if now - self._reconciled_at > RECONCILE_SECONDS:
+            self._reconciled_at = now
+            for event_id in self._open_events:
+                await self.reconcile_sold(event_id)
+        if now - self._abandon_checked_at > ABANDON_CHECK_SECONDS:
+            self._abandon_checked_at = now
+            await self.abandon_stale_orders()
+
+    async def reconcile_sold(self, event_id: int) -> int:
+        """Проданные места из базы (источник правды) — в Redis, если их там нет.
+
+        Покупка пишет сначала в базу, потом в Redis; если вторая запись не
+        удалась (или Redis перезапустился без данных), без сверки место выглядело
+        бы свободным, и его можно было бы забронировать — покупка бы потом
+        упёрлась в UNIQUE базы, но человек зря потратил бы время.
+        """
+        async with db_for_app(self._app) as connection:
+            rows = await connection.fetch(
+                "SELECT seat_id FROM tickets WHERE event_id = $1", event_id
+            )
+        restored = await self._seats.restore_sold(event_id, [row["seat_id"] for row in rows])
+        if restored:
+            log.warning("redis_sold_restored", extra={"event_id": event_id, "seats": restored})
+        return restored
+
+    async def abandon_stale_orders(self) -> list[int]:
+        """Заказы, зависшие в 'pending' (процесс упал посреди оплаты), — закрыть
+        и вернуть деньги, если они успели списаться. Иначе деньги висели бы у нас
+        без билета, а место — в неопределённости."""
+        async with db_for_app(self._app) as connection:
+            rows = await connection.fetch(
+                """
+                UPDATE orders SET status = 'failed', failure_reason = 'abandoned',
+                                  updated_at = now()
+                WHERE status = 'pending'
+                  AND created_at < now() - make_interval(secs => $1)
+                RETURNING id
+                """,
+                self._settings.pending_order_timeout_seconds,
+            )
+        abandoned = [row["id"] for row in rows]
+        for order_id in abandoned:
+            refunded = await self._app.state.payments.refund(order_id)
+            log.warning("order_abandoned", extra={"order_id": order_id, "refunded": refunded})
+        return abandoned
 
     async def _events_on_sale(self) -> list[int]:
         if time.monotonic() - self._open_events_at > OPEN_EVENTS_REFRESH_SECONDS:
