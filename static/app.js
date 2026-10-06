@@ -161,6 +161,7 @@ const queue = {
     try {
       const response = await fetch(`/api/events/${this.event.id}/queue`, { method: "POST" });
       const body = await response.json().catch(() => null);
+      if (body?.reason === "sold_out") return this.view("Все билеты проданы", "");
       if (!response.ok) {
         const wait = response.headers.get("Retry-After");
         this.view(body?.detail || `Ошибка ${response.status}`,
@@ -191,6 +192,12 @@ const queue = {
   },
 
   async onBroadcast(state) {
+    if (state.sold_out && !this.admitted) {
+      // Ждать дальше бессмысленно — честно говорим сразу.
+      this.close();
+      this.view("Все билеты проданы", "Спасибо, что были с нами.");
+      return;
+    }
     if (this.seq === null || this.admitted) return;
     if (state.admitted_upto >= this.seq) {
       // Наш номер прошёл — впустили или пропустили: уточняем у сервера.
@@ -298,8 +305,11 @@ const hall = {
 
   applyChanges(message) {
     if (this.version === null) { this.pending.push(message); return; }
+    // Сервер склеивает изменения за ~150 мс в одно сообщение с диапазоном версий
+    // from_version..version (у места — последний статус в окне).
+    const from = message.from_version ?? message.version;
     if (message.version <= this.version) return;          // уже в снимке
-    if (message.version > this.version + 1) {             // пропуск — нужен свежий снимок
+    if (from > this.version + 1) {                        // пропуск — нужен свежий снимок
       live.restart();
       return;
     }

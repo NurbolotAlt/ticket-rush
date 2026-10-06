@@ -1,6 +1,7 @@
 """Рассылка по WebSocket: порядок сообщений и изоляция медленных клиентов."""
 
 import asyncio
+import json
 import random
 
 from app.realtime import OUTBOX_LIMIT, ConnectionManager
@@ -76,3 +77,24 @@ async def test_personal_message_reaches_only_that_session():
     await asyncio.sleep(0.05)
 
     assert stranger.received == []
+
+
+async def test_batcher_merges_contiguous_versions_and_keeps_last_status():
+    from app.realtime import SeatChangeBatcher
+
+    manager = ConnectionManager()
+    ws = FakeWebSocket()
+    manager.add(1, ws)
+    batcher = SeatChangeBatcher(manager, window_seconds=0.05)
+
+    batcher.handle('{"event_id":1,"version":1,"changes":[[10,"held"]]}')
+    batcher.handle('{"event_id":1,"version":2,"changes":[[11,"held"]]}')
+    batcher.handle('{"event_id":1,"version":3,"changes":[[10,"sold"]]}')
+    # версия 4 потерялась — 5 должна уйти отдельным сообщением
+    batcher.handle('{"event_id":1,"version":5,"changes":[[12,"held"]]}')
+    await ws.wait_received(2)
+
+    first, second = (json.loads(m) for m in ws.received)
+    assert (first["from_version"], first["version"]) == (1, 3)
+    assert sorted(first["changes"]) == [[10, "sold"], [11, "held"]]  # у места 10 — последний
+    assert (second["from_version"], second["version"]) == (5, 5)

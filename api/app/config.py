@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     hold_ttl_seconds: int = 300
     # Больше 4 мест в одни руки — меньше простора для перекупщиков.
     max_seats_per_session: int = 4
+    # Окно склейки изменений схемы зала перед рассылкой (см. SeatChangeBatcher).
+    seat_changes_batch_ms: int = 150
 
     # --- Покупка ---
     # На время оплаты бронь продлевается хотя бы на столько: иначе она могла бы

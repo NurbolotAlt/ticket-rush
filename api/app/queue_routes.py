@@ -88,6 +88,8 @@ async def join_queue(request: Request, event_id: EventId) -> Response:
         return personal(body)
     if now >= starts_at:
         return personal(error(409, "Продажи закрыты", "sale_closed"))
+    if await request.app.state.room.is_sold_out(event_id):
+        return personal(error(409, "Все билеты проданы", "sold_out"))
 
     # Два лимита. По сессии — строгий. Но бот, не хранящий cookie, получает новую
     # сессию на КАЖДЫЙ запрос, и лимит по сессии его не остановит — поэтому ещё

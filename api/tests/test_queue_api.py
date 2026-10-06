@@ -122,3 +122,28 @@ def test_websocket_receives_queue_state(settings, redis_url):
         )
         assert ws.receive_json()["admitted_upto"] == 42
     publisher.close()
+
+
+async def test_sold_out_stops_queue_and_tells_waiters(settings, db, redis):
+    from app.seats import keys as seat_keys
+
+    event_id, _ = await seed(
+        db,
+        SeedSettings(
+            seed_sale_opens_in_minutes=-1, seed_sections="A", seed_rows=1, seed_seats_per_row=2
+        ),
+    )
+    async with running_app(settings) as client:
+        await client.post(f"/api/events/{event_id}/queue")  # ждёт в очереди
+        seat_ids = await db.fetch("SELECT id FROM seats WHERE event_id = $1", event_id)
+        await redis.sadd(seat_keys(event_id)["sold"], *[row["id"] for row in seat_ids])
+
+        await client.app.state.admitter.step()
+
+        state = json.loads(await redis.get(f"q:{event_id}:state"))
+        assert state["sold_out"] is True
+        assert state["admitted_upto"] == 0  # никого не впустили — нечего покупать
+        client.cookies.clear()
+        late = await client.post(f"/api/events/{event_id}/queue")
+        assert late.status_code == 409
+        assert late.json()["reason"] == "sold_out"

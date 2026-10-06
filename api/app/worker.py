@@ -32,6 +32,15 @@ from app.ticket_pdf import render_tickets_pdf
 
 log = logging.getLogger(__name__)
 
+# Записи воркера (счётчик попыток, готовый PDF) коммитятся БЕЗ ожидания сброса
+# журнала (WAL) на диск. Под нагрузкой база простаивала, а время уходило именно
+# на COMMIT — ожидание диска (выборка pg_stat_activity), плюс каждый PDF целиком
+# пишется в WAL. Эти записи восстановимы: при падении ПОСТГРЕСА (не приложения)
+# теряются лишь последние доли секунды, и сверка лидера перегенерирует PDF.
+# Целостность базы асинхронный коммит не нарушает. Заказы и билеты — деньги —
+# по-прежнему коммитятся синхронно, это настройка только этих транзакций.
+ASYNC_COMMIT = "SET LOCAL synchronous_commit TO OFF"
+
 
 class TicketWorker:
     def __init__(
@@ -125,16 +134,20 @@ class TicketWorker:
         order_id = int(fields["order_id"])
         ctx = {"order_id": order_id, "message_id": message_id}
         async with self._db.acquire(timeout=5) as connection:
-            # Счётчик попыток увеличиваем ДО работы: если рендеринг роняет процесс,
-            # попытка всё равно засчитается.
-            order = await connection.fetchrow(
-                """
-                UPDATE orders SET pdf_attempts = pdf_attempts + 1
-                WHERE id = $1
-                RETURNING id, session_id, event_id, status, pdf_status, pdf_attempts
-                """,
-                order_id,
-            )
+            # Счётчик попыток увеличиваем ДО работы и коммитим ОТДЕЛЬНОЙ транзакцией:
+            # если загрузка или рендеринг упадёт, попытка всё равно засчитается.
+            # (В одной транзакции с работой откат стирал бы и счётчик — тогда
+            # "отравленная" задача крутилась бы вечно; это ловит тест.)
+            async with connection.transaction():
+                await connection.execute(ASYNC_COMMIT)
+                order = await connection.fetchrow(
+                    """
+                    UPDATE orders SET pdf_attempts = pdf_attempts + 1
+                    WHERE id = $1
+                    RETURNING id, session_id, event_id, status, pdf_status, pdf_attempts
+                    """,
+                    order_id,
+                )
             if order is None or order["status"] != "paid" or order["pdf_status"] == "ready":
                 # Нечего делать или уже сделано (повторная доставка) — подтверждаем.
                 await self._redis.xack(STREAM, GROUP, message_id)
@@ -151,6 +164,7 @@ class TicketWorker:
         )
 
         async with self._db.acquire(timeout=5) as connection, connection.transaction():
+            await connection.execute(ASYNC_COMMIT)
             # ON CONFLICT DO NOTHING: если два воркера всё же сделали одну задачу
             # (один завис, задачу забрал другой, первый ожил) — останется один PDF.
             await connection.execute(

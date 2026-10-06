@@ -295,6 +295,9 @@ class SeatStore:
             )
         )
 
+    async def sold_count(self, event_id: int) -> int:
+        return int(await self._redis.scard(keys(event_id)["sold"]))
+
     async def my_holds(self, event_id: int, session_id: str) -> tuple[list[int], int | None]:
         """Места сессии и общий срок их брони (мс)."""
         k = keys(event_id, session_id)

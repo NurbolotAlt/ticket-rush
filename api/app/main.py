@@ -25,6 +25,7 @@ from app.queue_routes import EventScheduleCache
 from app.realtime import (
     ConnectionManager,
     RedisSubscriber,
+    SeatChangeBatcher,
     route_by_event,
     route_to_session,
 )
@@ -73,7 +74,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.redis,
             {
                 STATE_CHANNEL: route,
-                CHANGES_CHANNEL: route,
+                CHANGES_CHANNEL: SeatChangeBatcher(
+                    app.state.manager, settings.seat_changes_batch_ms / 1000
+                ).handle,
                 ORDERS_CHANNEL: route_to_session(app.state.manager),
             },
         )

@@ -58,6 +58,7 @@ class Admitter:
         self.is_leader = False
         self._rates: dict[int, float] = {}
         self._open_events: list[int] = []
+        self._hall_size: dict[int, int] = {}
         self._open_events_at = 0.0
         self._reconciled_at = 0.0
         self._abandon_checked_at = 0.0
@@ -119,6 +120,19 @@ class Admitter:
 
     async def _tick(self, event_id: int) -> None:
         s = self._settings
+        # Всё продано — впускать незачем, а ждущим нужно об этом СКАЗАТЬ. Без этого
+        # (нагрузочный тест) 1935 человек ждали в очереди после того, как все 2000
+        # мест были проданы. Проданное в Redis отстаёт от базы не больше чем на
+        # сверку, а флаг с TTL снимется сам, если места вернутся (возврат билета).
+        sold_out = await self._seats.sold_count(event_id) >= self._hall_size.get(event_id, 1 << 30)
+        if sold_out:
+            await self._room.mark_sold_out(event_id)
+            upto, active = await self._room.current_progress(event_id)
+            joined = await self._room.joined_total(event_id)
+            await self._room.save_state(event_id, self._state(
+                event_id, upto, joined, active, 0.0, sold_out=True))
+            return
+
         result = await self._room.admit(
             event_id,
             leader_key=LEADER_KEY,
@@ -138,20 +152,7 @@ class Admitter:
         waiting = max(joined - result.admitted_upto, 0)
         rate = self._measure_rate(event_id, result.admitted, waiting)
         await self._room.save_state(
-            event_id,
-            {
-                # Тип нужен клиенту: по одному WebSocket приходят и состояние
-                # очереди, и изменения схемы зала.
-                "type": "queue",
-                "event_id": event_id,
-                "admitted_upto": result.admitted_upto,
-                "joined": joined,
-                "waiting": waiting,
-                "active": result.active,
-                "capacity": s.admit_capacity,
-                "rate_per_second": round(rate, 1),
-                "ts": int(time.time()),
-            },
+            event_id, self._state(event_id, result.admitted_upto, joined, result.active, rate)
         )
         if result.admitted or result.skipped:
             log.info(
@@ -164,6 +165,25 @@ class Admitter:
                     "active": result.active,
                 },
             )
+
+    def _state(
+        self, event_id: int, upto: int, joined: int, active: int, rate: float,
+        sold_out: bool = False,
+    ) -> dict:
+        return {
+            # Тип нужен клиенту: по одному WebSocket приходят и состояние очереди,
+            # и изменения схемы зала.
+            "type": "queue",
+            "event_id": event_id,
+            "admitted_upto": upto,
+            "joined": joined,
+            "waiting": max(joined - upto, 0),
+            "active": active,
+            "capacity": self._settings.admit_capacity,
+            "rate_per_second": round(rate, 1),
+            "sold_out": sold_out,
+            "ts": int(time.time()),
+        }
 
     def _measure_rate(self, event_id: int, admitted: int, waiting: int) -> float:
         # Реальная скорость впуска, а не настроечная: когда покупатели заняли всю
@@ -259,8 +279,11 @@ class Admitter:
         if time.monotonic() - self._open_events_at > OPEN_EVENTS_REFRESH_SECONDS:
             async with db_for_app(self._app) as connection:
                 rows = await connection.fetch(
-                    "SELECT id FROM events WHERE sale_opens_at <= now() AND starts_at > now()"
+                    "SELECT e.id, count(s.id) AS seats FROM events e "
+                    "JOIN seats s ON s.event_id = e.id "
+                    "WHERE e.sale_opens_at <= now() AND e.starts_at > now() GROUP BY e.id"
                 )
             self._open_events = [row["id"] for row in rows]
+            self._hall_size = {row["id"]: row["seats"] for row in rows}
             self._open_events_at = time.monotonic()
         return self._open_events

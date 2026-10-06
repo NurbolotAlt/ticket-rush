@@ -98,3 +98,19 @@ async def test_status_lifecycle(redis):
 
 async def test_unknown_session_status(redis):
     assert (await WaitingRoom(redis).status(1, "nobody"))["state"] == "not_in_queue"
+
+
+async def test_pass_of_user_who_left_is_revoked(redis):
+    # Впущенный ушёл (не нашёл мест, закрыл вкладку) и молчит дольше presence —
+    # его пропуск отзывается, и место покупателя достаётся следующему в очереди.
+    room = WaitingRoom(redis)
+    for sid in ("alice", "bob"):
+        await room.join(1, sid)
+    await admit(room, redis, capacity=1)
+    assert await redis.zscore(keys(1)["active"], "alice") is not None
+
+    await redis.zadd(keys(1)["seen"], {"alice": now_ms() - 120_000})
+    result = await admit(room, redis, capacity=1)
+
+    assert await redis.zscore(keys(1)["active"], "alice") is None
+    assert result.admitted == 1  # bob

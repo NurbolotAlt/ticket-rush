@@ -25,7 +25,8 @@ STATE_CHANNEL = "queue:state"
 def keys(event_id: int) -> dict[str, str]:
     base = f"q:{event_id}"
     return {
-        name: f"{base}:{name}" for name in ("seq", "line", "seen", "active", "upto", "state")
+        name: f"{base}:{name}"
+        for name in ("seq", "line", "seen", "active", "upto", "state", "sold_out")
     }
 
 
@@ -70,6 +71,17 @@ end
 
 -- Истёкшие пропуска освобождают места для следующих.
 redis.call('ZREMRANGEBYSCORE', active, '-inf', now)
+-- Как и ждущих, впущенных проверяем на присутствие: ушёл (закрыл вкладку, не
+-- нашёл мест) и молчит дольше presence — пропуск отзываем. Без этого ушедший
+-- держал бы место покупателя все 10 минут жизни пропуска, а очередь стояла бы
+-- (нагрузочный тест: 200 из 200 пропусков у ушедших, впуск остановился).
+-- Цена — проход по active, а он не больше ёмкости (сотни записей).
+for _, sid in ipairs(redis.call('ZRANGE', active, 0, -1)) do
+    local last_seen = redis.call('ZSCORE', seen, sid)
+    if not last_seen or tonumber(last_seen) < now - presence then
+        redis.call('ZREM', active, sid)
+    end
+end
 local active_count = redis.call('ZCARD', active)
 local slots = math.min(capacity - active_count, max_admit)
 local upto = tonumber(redis.call('GET', upto_key) or '0')
@@ -142,7 +154,12 @@ class WaitingRoom:
         snapshot = json.loads(state) if state else {}
         rate = snapshot.get("rate_per_second") or 0
         upto = int(upto or 0)
-        body: dict = {"event_id": event_id, "admitted_upto": upto, "rate_per_second": rate}
+        body: dict = {
+            "event_id": event_id,
+            "admitted_upto": upto,
+            "rate_per_second": rate,
+            "sold_out": bool(snapshot.get("sold_out")),
+        }
         if seq is None:
             return body | {"state": "not_in_queue"}
         seq = int(seq)
@@ -183,6 +200,22 @@ class WaitingRoom:
                   max_admit * 4],
         )
         return AdmitResult(admitted >= 0, max(admitted, 0), skipped, upto, active)
+
+    async def mark_sold_out(self, event_id: int) -> None:
+        # Флаг с TTL: живёт, пока впускатель его продлевает (каждый тик).
+        await self._redis.set(keys(event_id)["sold_out"], 1, ex=60)
+
+    async def is_sold_out(self, event_id: int) -> bool:
+        return bool(await self._redis.exists(keys(event_id)["sold_out"]))
+
+    async def current_progress(self, event_id: int) -> tuple[int, int]:
+        """(впущено до номера, активных пропусков) — без впуска."""
+        k = keys(event_id)
+        async with self._redis.pipeline(transaction=False) as pipe:
+            pipe.get(k["upto"])
+            pipe.zcard(k["active"])
+            upto, active = await pipe.execute()
+        return int(upto or 0), int(active)
 
     async def joined_total(self, event_id: int) -> int:
         return int(await self._redis.get(keys(event_id)["seq"]) or 0)

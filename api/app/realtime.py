@@ -17,8 +17,8 @@ from redis.exceptions import RedisError
 
 log = logging.getLogger(__name__)
 
-# Медленный клиент (плохая сеть) не должен задерживать рассылку остальным.
-SEND_TIMEOUT_SECONDS = 2.0
+# Закрытие соединения с отставшим клиентом не должно висеть вечно.
+CLOSE_TIMEOUT_SECONDS = 2.0
 # Сколько сообщений может скопиться у клиента. Больше — он безнадёжно отстал:
 # отключаем, он переподключится и получит свежий снимок вместо сотни изменений.
 OUTBOX_LIMIT = 200
@@ -84,6 +84,10 @@ class ConnectionManager:
         try:
             client.outbox.put_nowait(message)
         except asyncio.QueueFull:
+            # Медленного (или зависшего) клиента ловит переполнение ЕГО очереди, а не
+            # таймаут на каждую отправку: таймер на каждое сообщение каждому клиенту
+            # стоил ~8% CPU воркера под нагрузкой (профиль py-spy). Остальных он не
+            # тормозит и так — у каждого клиента свой отправитель.
             log.warning("ws_client_too_slow", extra={"event_id": event_id})
             self.remove(event_id, client)
             # Закрываем в фоне: нас вызвали синхронно из обработчика подписки.
@@ -103,13 +107,13 @@ class ConnectionManager:
         try:
             while True:
                 message = await client.outbox.get()
-                await asyncio.wait_for(client.websocket.send_text(message), SEND_TIMEOUT_SECONDS)
+                await client.websocket.send_text(message)
         except asyncio.CancelledError:
             raise
         except Exception:
-            # Отвалился или не принял сообщение за SEND_TIMEOUT — убираем и
-            # закрываем соединение: иначе браузер считал бы себя подключённым,
-            # а изменения ему больше не шли бы. Он переподключится и получит снимок.
+            # Соединение оборвалось — убираем и закрываем: иначе браузер мог бы
+            # считать себя подключённым, а изменения ему больше не шли бы. Он
+            # переподключится и получит свежий снимок.
             self.remove(event_id, client)
             await self._close(client)
 
@@ -117,7 +121,7 @@ class ConnectionManager:
     async def _close(client: Client) -> None:
         try:
             # 1013 "Try Again Later": клиенту стоит переподключиться.
-            await client.websocket.close(code=1013)
+            await asyncio.wait_for(client.websocket.close(code=1013), CLOSE_TIMEOUT_SECONDS)
         except Exception:
             pass
 
@@ -193,6 +197,67 @@ class RedisSubscriber:
             self._handlers[channel](data)
         except Exception:
             log.exception("pubsub_handler_failed", extra={"channel": channel})
+
+
+class SeatChangeBatcher:
+    """Склеивает изменения мест за короткое окно в одно сообщение на клиента.
+
+    Профиль под нагрузкой: больше всего CPU воркеров уходило на рассылку — каждая
+    бронь/покупка/освобождение отдельным сообщением каждому из сотен зрителей.
+    За 150 мс происходят десятки изменений; одно сообщение с диапазоном версий
+    вместо десятков — во столько же раз меньше отправок. Цена — схема зала
+    обновляется с задержкой до окна, для зрителя незаметной.
+
+    Склеиваются только НЕПРЕРЫВНЫЕ версии: если между ними дыра (сообщение
+    потерялось), отправляем раздельно — клиент увидит пропуск и возьмёт снимок.
+    """
+
+    def __init__(self, manager: ConnectionManager, window_seconds: float) -> None:
+        self._manager = manager
+        self._window = window_seconds
+        self._pending: dict[int, list[dict]] = {}
+
+    def handle(self, raw: str) -> None:
+        message = json.loads(raw)
+        event_id = int(message["event_id"])
+        if event_id not in self._pending:
+            self._pending[event_id] = []
+            asyncio.get_running_loop().call_later(self._window, self._flush, event_id)
+        self._pending[event_id].append(message)
+
+    def _flush(self, event_id: int) -> None:
+        messages = sorted(self._pending.pop(event_id, []), key=lambda m: m["version"])
+        for run in contiguous_runs(messages):
+            # Порядок важен: у места побеждает ПОСЛЕДНИЙ статус в окне
+            # (забронировали и сразу купили -> "sold").
+            merged: dict[int, str] = {}
+            for message in run:
+                for seat, status in message["changes"]:
+                    merged.pop(seat, None)
+                    merged[seat] = status
+            self._manager.broadcast_nowait(
+                event_id,
+                json.dumps(
+                    {
+                        "type": "seats",
+                        "event_id": event_id,
+                        "from_version": run[0]["version"],
+                        "version": run[-1]["version"],
+                        "changes": [[seat, status] for seat, status in merged.items()],
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+
+
+def contiguous_runs(messages: list[dict]) -> list[list[dict]]:
+    runs: list[list[dict]] = []
+    for message in messages:
+        if runs and message["version"] == runs[-1][-1]["version"] + 1:
+            runs[-1].append(message)
+        else:
+            runs.append([message])
+    return runs
 
 
 def route_to_session(manager: ConnectionManager) -> Callable[[str], None]:

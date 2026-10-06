@@ -31,6 +31,16 @@ class RequestIdMiddleware:
         request_id = incoming if _VALID.match(incoming) else uuid.uuid4().hex
         token = request_id_var.set(request_id)
 
+        if scope["type"] == "websocket":
+            # Для WebSocket — только id в логах. Оборачивать send незачем: заголовок
+            # ставится лишь в HTTP-ответ, а обёртка на КАЖДОЕ сообщение соединения
+            # стоила заметных процентов CPU при массовой рассылке (профиль py-spy).
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                request_id_var.reset(token)
+            return
+
         async def send_with_header(message: Message) -> None:
             # Возвращаем id клиенту: в отчёте об ошибке пользователь может его
             # назвать, и мы найдём этот запрос в логах.

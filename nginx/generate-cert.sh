@@ -17,8 +17,12 @@ fi
 
 mkdir -p /etc/nginx/certs
 
+# ECDSA P-256, а не RSA-2048: подпись при TLS-рукопожатии во много раз дешевле.
+# При открытии продаж тысячи браузеров подключаются одновременно, и на RSA nginx
+# упирался в процессор (нагрузочный тест: 372% CPU). Все современные браузеры
+# ECDSA поддерживают.
 openssl req -x509 -nodes -days 365 \
-  -newkey rsa:2048 \
+  -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
   -keyout /etc/nginx/certs/selfsigned.key \
   -out /etc/nginx/certs/selfsigned.crt \
   -subj "/C=KG/ST=Bishkek/L=Bishkek/O=TicketRush/CN=localhost" 2>/dev/null
