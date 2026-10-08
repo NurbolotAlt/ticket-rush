@@ -27,7 +27,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -76,7 +76,7 @@ jobs:
             context: .
             file: ./nginx/Dockerfile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
       - name: Build ${{ matrix.name }} image
         uses: docker/build-push-action@v6
@@ -99,7 +99,7 @@ jobs:
       COMPOSE_PROJECT_NAME: ticket-rush
       COMPOSE_FILES: -f docker-compose.yml -f loadtest/docker-compose.loadtest.yml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Generate secrets for the throwaway stack
         run: |
