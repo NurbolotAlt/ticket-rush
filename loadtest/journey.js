@@ -44,7 +44,9 @@ export const options = {
       maxDuration: "8m",
     },
   },
-  thresholds: {
+  // SMOKE=1 (CI): только корректность — задержки на общих раннерах GitHub
+  // непредсказуемы, и пороги по ним давали бы ложные падения.
+  thresholds: __ENV.SMOKE ? { journey_unexpected: ["count==0"] } : {
     journey_unexpected: ["count==0"],
     step_page_load_ms: ["p(95)<2000"],
     step_hold_ms: ["p(95)<1000"],

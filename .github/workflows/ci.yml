@@ -1,0 +1,133 @@
+# CI на каждый push в main и pull request:
+#   test  — ruff, pytest на настоящих PostgreSQL и Redis (Testcontainers), Trivy
+#   build — сборка образов api и nginx
+#   e2e   — весь стек в docker compose + k6 "открытие продаж" на 200 человек +
+#           проверка инвариантов в базе (ни одного места с двумя билетами и т.д.)
+#
+# requirements*.txt — "замки" с точными версиями и хэшами (pip-compile из *.in):
+# CI и образы получают ровно те версии, что прошли тесты.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Новый push в ту же ветку отменяет устаревший прогон.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            api/requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r api/requirements.txt -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check api
+
+      # На ubuntu-latest Docker уже есть — Testcontainers поднимает настоящие
+      # PostgreSQL и Redis без дополнительной настройки.
+      - name: Tests (real PostgreSQL and Redis via Testcontainers)
+        working-directory: api
+        run: python -m pytest -q
+
+      # Известные уязвимости в зафиксированных зависимостях. Падаем только на
+      # CRITICAL, для которых уже есть исправленная версия. Экшен закреплён по хэшу
+      # коммита: тег можно перевесить на другой код, хэш — нет.
+      - name: Vulnerability scan (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: api
+            context: ./api
+            file: ./api/Dockerfile
+          # nginx собирается из КОРНЯ проекта: Dockerfile копирует static/
+          - name: nginx
+            context: .
+            file: ./nginx/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build ${{ matrix.name }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: false
+          tags: ticket-rush-${{ matrix.name }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  # Сквозная проверка: юнит-тесты не ловят ошибки стыков (nginx <-> API <->
+  # воркер <-> Redis <-> Postgres) — именно так этап 7 нашёл ошибки, невидимые
+  # по отдельности. Задержки здесь не проверяются (общие раннеры GitHub
+  # непредсказуемы по времени), проверяется корректность.
+  e2e:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      COMPOSE_PROJECT_NAME: ticket-rush
+      COMPOSE_FILES: -f docker-compose.yml -f loadtest/docker-compose.loadtest.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate secrets for the throwaway stack
+        run: |
+          {
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
+            echo "SESSION_SECRET=$(openssl rand -hex 32)"
+            echo "SEED_SALE_OPENS_IN_MINUTES=-1"
+          } > .env
+
+      - name: Start stack (2 API replicas, 2 PDF workers)
+        run: |
+          docker compose $COMPOSE_FILES up -d --build --scale api=2 --scale worker=2
+          curl -fsk --retry 40 --retry-delay 3 --retry-all-errors https://localhost/api/health
+
+      - name: Sale opens — 200 users with k6
+        run: |
+          sh loadtest/reset.sh
+          docker run --rm -i --network ticket-rush_default \
+            -e VUS=200 -e ARRIVAL_SECONDS=5 -e SMOKE=1 \
+            grafana/k6:2.3.0 run - < loadtest/journey.js
+
+      - name: Invariants in the database
+        run: sh loadtest/check_invariants.sh
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+
+      - name: Stop stack
+        if: always()
+        run: docker compose $COMPOSE_FILES down

@@ -1,0 +1,30 @@
+# Зафиксированные версии сами не обновляются: без Dependabot "замки" со временем
+# превращаются в набор устаревших пакетов с известными уязвимостями. Раз в неделю
+# он открывает PR с обновлениями, а CI (включая e2e) проверяет их.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /api
+    schedule:
+      interval: weekly
+    groups:
+      api:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      dev:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directories: ["/api", "/nginx"]
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
