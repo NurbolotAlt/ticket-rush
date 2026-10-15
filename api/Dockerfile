@@ -2,7 +2,7 @@
 
 # Стадия 1: зависимости ставятся в отдельный venv. Кэш pip и всё, что нужно
 # только для сборки, в финальный образ не попадает.
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -16,7 +16,7 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 # Стадия 2: только интерпретатор, готовый venv и код.
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # curl — только для HEALTHCHECK. fonts-dejavu-core — шрифт с кириллицей для
 # PDF-билетов (воркер использует тот же образ, что и API).
